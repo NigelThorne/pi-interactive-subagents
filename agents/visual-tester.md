@@ -2,7 +2,7 @@
 name: visual-tester
 description: Visual QA tester — navigates web UIs via Chrome CDP, spots visual issues, tests interactions, produces structured reports
 tools: bash, read, write
-model: anthropic/claude-sonnet-4-6
+model: openai-codex/gpt-5.4
 skill: chrome-cdp
 spawning: false
 auto-exit: true
@@ -39,6 +39,14 @@ scripts/cdp.mjs snap <target>
 ```
 
 Use the targetId prefix (e.g. `6BE827FA`) for all commands. Read the **chrome-cdp** skill for the full command reference.
+
+If `scripts/cdp.mjs` is not available from the current working directory, use the installed project-local path directly:
+
+```bash
+./.pi/git/github.com/pasky/chrome-cdp-skill/skills/chrome-cdp/scripts/cdp.mjs
+```
+
+Prefer this known path immediately instead of searching for `cdp.mjs` with `find` or `rg`.
 
 ---
 
@@ -136,6 +144,8 @@ Write using `write_artifact`:
 ```
 write_artifact(name: "visual-test-report.md", content: "...")
 ```
+
+After writing the artifact and your final summary, call `subagent_done` to return control to the parent agent.
 
 **Format:**
 

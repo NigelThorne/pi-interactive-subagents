@@ -13,8 +13,22 @@ import {
   copySessionFile,
   mergeNewEntries,
 } from "../pi-extension/subagents/session.ts";
+import {
+  buildCompletionInstructions,
+  buildResumeFollowupMessage,
+} from "../pi-extension/subagents/prompt.ts";
 
-import { shellEscape, isCmuxAvailable } from "../pi-extension/subagents/cmux.ts";
+import {
+  shellEscape,
+  isCmuxAvailable,
+  shouldRenameWorkspace,
+} from "../pi-extension/subagents/cmux.ts";
+import {
+  canReuseTabForSubagents,
+  encodePipeArgs,
+  normalizePaneId,
+  paneSurface,
+} from "../pi-extension/subagents/zellij.ts";
 
 // --- Helpers ---
 
@@ -246,6 +260,83 @@ describe("session.ts", () => {
   });
 });
 
+describe("prompt.ts", () => {
+  describe("buildCompletionInstructions", () => {
+    it("requires the real subagent_done tool name and avoids final-answer wording", () => {
+      const prompt = buildCompletionInstructions();
+      assert.match(prompt, /call the `subagent_done` tool/);
+      assert.match(prompt, /Do not end the turn after only writing the summary/);
+      assert.doesNotMatch(prompt, /subagent-done/);
+      assert.doesNotMatch(prompt, /FINAL assistant message/);
+    });
+
+    it("does not require subagent_done for auto-exit agents", () => {
+      const prompt = buildCompletionInstructions({ autoExit: true });
+      assert.match(prompt, /include a concise summary/);
+      assert.doesNotMatch(prompt, /subagent_done/);
+    });
+  });
+
+  describe("buildResumeFollowupMessage", () => {
+    it("preserves the follow-up request and appends completion instructions", () => {
+      const prompt = buildResumeFollowupMessage("Please make one more tweak.");
+      assert.match(prompt, /^Please make one more tweak\./);
+      assert.match(prompt, /call the `subagent_done` tool/);
+      assert.match(prompt, /Do not wait for further input once finished\./);
+    });
+
+    it("separates instructions from the user message with a blank line", () => {
+      const prompt = buildResumeFollowupMessage("Follow up");
+      assert.match(prompt, /^Follow up\n\nWhen you complete this follow-up/);
+    });
+  });
+});
+
+describe("zellij.ts", () => {
+  describe("normalizePaneId", () => {
+    it("normalizes pane: ids", () => {
+      assert.equal(normalizePaneId("pane:12"), "12");
+    });
+
+    it("normalizes terminal_ ids", () => {
+      assert.equal(normalizePaneId("terminal_9"), "9");
+    });
+  });
+
+  describe("paneSurface", () => {
+    it("wraps normalized ids in pane prefix", () => {
+      assert.equal(paneSurface("terminal_9"), "pane:9");
+    });
+  });
+
+  describe("canReuseTabForSubagents", () => {
+    it("allows a tab with just the main pane", () => {
+      assert.equal(canReuseTabForSubagents("5", ["5"], []), true);
+    });
+
+    it("allows a tab with only owned subagent panes", () => {
+      assert.equal(canReuseTabForSubagents("5", ["5", "6", "7"], ["pane:6", "terminal_7"]), true);
+    });
+
+    it("rejects unrelated panes", () => {
+      assert.equal(canReuseTabForSubagents("5", ["5", "9"], ["pane:6"]), false);
+    });
+  });
+
+  describe("encodePipeArgs", () => {
+    it("encodes all args in a single comma-separated string", () => {
+      assert.equal(
+        encodePipeArgs({ pane_id: 0, pane_kind: "terminal", focus: true }),
+        "pane_id=0,pane_kind=terminal,focus=true",
+      );
+    });
+
+    it("skips undefined values", () => {
+      assert.equal(encodePipeArgs({ pane_id: 0, tab_name: undefined }), "pane_id=0");
+    });
+  });
+});
+
 describe("cmux.ts", () => {
   describe("shellEscape", () => {
     it("wraps in single quotes", () => {
@@ -275,6 +366,12 @@ describe("cmux.ts", () => {
       // Can't easily mock env in node:test, just verify it returns a boolean
       const result = isCmuxAvailable();
       assert.equal(typeof result, "boolean");
+    });
+  });
+
+  describe("shouldRenameWorkspace", () => {
+    it("disables zellij session renames by default", () => {
+      assert.equal(shouldRenameWorkspace("zellij"), false);
     });
   });
 });

@@ -16,15 +16,18 @@ import { homedir, tmpdir } from "node:os";
 import {
   isMuxAvailable,
   muxSetupHint,
+  getMuxBackend,
   createSurface,
   sendCommand,
-  pollForExit,
   closeSurface,
   shellEscape,
-  exitStatusVar,
+  captureExitStatusCommand,
+  prepareForSubagents,
+  renameCurrentPane,
   renameCurrentTab,
   renameWorkspace,
 } from "./cmux.ts";
+import { buildCompletionInstructions, buildResumeFollowupMessage } from "./prompt.ts";
 import { getNewEntries, findLastAssistantMessage } from "./session.ts";
 
 const SubagentParams = Type.Object({
@@ -104,8 +107,13 @@ function resolveDenyTools(agentDefs: AgentDefaults | null): Set<string> {
 
 function loadAgentDefaults(agentName: string): AgentDefaults | null {
   const paths = [
+    // Project-local agent definitions override user defaults.
     join(process.cwd(), ".pi", "agents", `${agentName}.md`),
+    // Nigel's version-controlled global agent definitions are the source of truth.
+    join(homedir(), ".my-pi", "agents", `${agentName}.md`),
+    // Backward-compatible fallback for older local installs.
     join(homedir(), ".pi", "agent", "agents", `${agentName}.md`),
+    // Bundled package defaults.
     join(dirname(new URL(import.meta.url).pathname), "../../agents", `${agentName}.md`),
   ];
   for (const p of paths) {
@@ -217,6 +225,7 @@ interface RunningSubagent {
   surface: string;
   startTime: number;
   sessionFile: string;
+  doneFile: string;
   entries?: number;
   bytes?: number;
   forkCleanupFile?: string;
@@ -239,6 +248,21 @@ function formatElapsedMMSS(startTime: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function formatSubagentLabel(name: string, agent?: string): string {
+  if (!agent || agent === name) return name;
+  return `${name} [${agent}]`;
+}
+
+function buildPropagatedEnvPrefixParts(): string[] {
+  const envNames = ["PTC_ALLOW_UNSANDBOXED_SUBPROCESS", "PTC_USE_DOCKER"];
+  return envNames
+    .map((name) => {
+      const value = process.env[name];
+      return value ? `${name}=${shellEscape(value)}` : null;
+    })
+    .filter((part): part is string => part !== null);
 }
 
 const ACCENT = "\x1b[38;2;77;163;255m";
@@ -312,8 +336,7 @@ function updateWidget() {
 
           for (const [_id, agent] of runningSubagents) {
             const elapsed = formatElapsedMMSS(agent.startTime);
-            const agentTag = agent.agent ? ` (${agent.agent})` : "";
-            const left = ` ${elapsed}  ${agent.name}${agentTag} `;
+            const left = ` ${elapsed}  ${agent.name} `;
             const right =
               agent.entries != null && agent.bytes != null
                 ? ` ${agent.entries} msgs (${formatBytes(agent.bytes)}) `
@@ -375,14 +398,8 @@ async function launchSubagent(
     Math.random().toString(16).slice(2, 6),
   ].join("-");
   const subagentSessionFile = join(sessionDir, `${timestamp}_${uuid}.jsonl`);
-
-  // Use pre-created surface (parallel mode) or create a new one.
-  // For new surfaces, pause briefly so the shell is ready before sending the command.
-  const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSurface(params.name);
-  if (!surfacePreCreated) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 500));
-  }
+  const subagentDoneFile = join(sessionDir, `${timestamp}_${uuid}.done`);
+  const displayName = formatSubagentLabel(params.name, params.agent);
 
   // Build the task message
   // When forking, the sub-agent already has the full conversation context.
@@ -390,22 +407,20 @@ async function launchSubagent(
   // that would confuse the agent into thinking it needs to restart.
   const modeHint = agentDefs?.autoExit
     ? "Complete your task autonomously."
-    : "Complete your task. When finished, call the subagent_done tool. The user can interact with you at any time.";
-  const summaryInstruction = agentDefs?.autoExit
-    ? "Your FINAL assistant message should summarize what you accomplished."
-    : "Your FINAL assistant message (before calling subagent_done or before the user exits) should summarize what you accomplished.";
+    : "Complete your task. The user can interact with you at any time.";
+  const completionInstructions = buildCompletionInstructions({ autoExit: agentDefs?.autoExit });
   const denySet = resolveDenyTools(agentDefs);
   const agentType = params.agent ?? params.name;
   const tabTitleInstruction = denySet.has("set_tab_title")
     ? ""
-    : `As your FIRST action, set the tab title using set_tab_title. ` +
+    : `As your FIRST action, set your title using set_tab_title. ` +
       `The title MUST start with [${agentType}] followed by a short description of your current task. ` +
       `Example: "[${agentType}] Analyzing auth module". Keep it concise.`;
   const identity = agentDefs?.body ?? params.systemPrompt ?? null;
   const roleBlock = identity ? `\n\n${identity}` : "";
   const fullTask = params.fork
     ? params.task
-    : `${roleBlock}\n\n${modeHint}\n\n${tabTitleInstruction}\n\n${params.task}\n\n${summaryInstruction}`;
+    : `${roleBlock}\n\n${modeHint}\n\n${tabTitleInstruction}\n\n${params.task}\n\n${completionInstructions}`;
 
   // Build pi command
   const parts: string[] = ["pi"];
@@ -466,8 +481,11 @@ async function launchSubagent(
     }
   }
 
-  // Build env prefix: denied tools + subagent identity
-  const envParts: string[] = [];
+  // Build env prefix: denied tools + subagent identity.
+  // Zellij-created panes inherit the zellij server environment, not necessarily
+  // the parent pi process environment. Propagate extension-critical env vars that
+  // may have been exported after the zellij server started.
+  const envParts: string[] = buildPropagatedEnvPrefixParts();
   if (denySet.size > 0) {
     envParts.push(`PI_DENY_TOOLS=${shellEscape([...denySet].join(","))}`);
   }
@@ -514,17 +532,35 @@ async function launchSubagent(
   const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
 
   const piCommand = cdPrefix + envPrefix + parts.join(" ");
-  const command = `${piCommand}; echo '__SUBAGENT_DONE_'${exitStatusVar()}'__'`;
-  sendCommand(surface, command);
+  const command = `${piCommand}; ${captureExitStatusCommand(subagentDoneFile)}`;
+
+  // Use pre-created surface (parallel mode) or create a new one.
+  // For zellij 0.44.1+, launch the command directly with `new-pane --close-on-exit -- <command>`
+  // so the pane can auto-close cleanly when the subagent exits.
+  const surfacePreCreated = !!options?.surface;
+  const muxBackend = getMuxBackend();
+  if (muxBackend === "zellij" && !process.env.PI_SUBAGENT_NAME) {
+    prepareForSubagents(`π ${displayName}`, [...runningSubagents.values()].map((subagent) => subagent.surface));
+  }
+  const surface =
+    options?.surface ??
+    (muxBackend === "zellij" ? createSurface(displayName, command) : createSurface(displayName));
+  if (!surfacePreCreated && muxBackend !== "zellij") {
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+  }
+  if (surfacePreCreated || muxBackend !== "zellij") {
+    sendCommand(surface, command);
+  }
 
   const running: RunningSubagent = {
     id,
-    name: params.name,
+    name: displayName,
     task: params.task,
     agent: params.agent,
     surface,
     startTime,
     sessionFile: subagentSessionFile,
+    doneFile: subagentDoneFile,
     forkCleanupFile,
   };
 
@@ -541,12 +577,16 @@ async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
 ): Promise<SubagentResult> {
-  const { name, task, surface, startTime, sessionFile, forkCleanupFile } = running;
+  const { name, task, surface, startTime, sessionFile, doneFile, forkCleanupFile } = running;
 
   try {
-    const exitCode = await pollForExit(surface, signal, {
-      interval: 1000,
-      onTick() {
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      const tick = () => {
+        if (signal.aborted) {
+          reject(new Error("Aborted while waiting for subagent to finish"));
+          return;
+        }
+
         // Update entries/bytes for widget display
         try {
           if (existsSync(sessionFile)) {
@@ -556,7 +596,30 @@ async function watchSubagent(
             running.bytes = stat.size;
           }
         } catch {}
-      },
+
+        try {
+          if (existsSync(doneFile)) {
+            const raw = readFileSync(doneFile, "utf8").trim();
+            const parsed = Number.parseInt(raw, 10);
+            if (!Number.isNaN(parsed)) {
+              resolve(parsed);
+              return;
+            }
+          }
+        } catch {}
+
+        const timer = setTimeout(tick, 1000);
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            reject(new Error("Aborted while waiting for subagent to finish"));
+          },
+          { once: true },
+        );
+      };
+
+      tick();
     });
 
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
@@ -580,6 +643,10 @@ async function watchSubagent(
     closeSurface(surface);
     runningSubagents.delete(running.id);
 
+    try {
+      unlinkSync(doneFile);
+    } catch {}
+
     // Clean up temp fork file
     if (forkCleanupFile) {
       try {
@@ -589,6 +656,9 @@ async function watchSubagent(
 
     return { name, task, summary, sessionFile, exitCode, elapsed };
   } catch (err: any) {
+    try {
+      unlinkSync(doneFile);
+    } catch {}
     if (forkCleanupFile) {
       try {
         unlinkSync(forkCleanupFile);
@@ -758,7 +828,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             {
               type: "text",
               text:
-                `Sub-agent "${params.name}" launched and is now running in the background. ` +
+                `Sub-agent "${running.name}" launched and is now running in the background. ` +
                 `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
                 `The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
                 `Until then, move on to other work or tell the user you're waiting.`,
@@ -766,7 +836,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           ],
           details: {
             id: running.id,
-            name: params.name,
+            name: running.name,
             task: params.task,
             agent: params.agent,
             sessionFile: running.sessionFile,
@@ -932,8 +1002,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           return muxUnavailableResult("tab-title");
         }
         try {
-          renameCurrentTab(params.title);
-          renameWorkspace(params.title);
+          if (process.env.PI_SUBAGENT_NAME) {
+            renameCurrentPane(params.title);
+          } else {
+            renameCurrentTab(params.title);
+            renameWorkspace(params.title);
+          }
           return {
             content: [{ type: "text", text: `Title set to: ${params.title}` }],
             details: { title: params.title },
@@ -1003,6 +1077,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
       async execute(_toolCallId, params, _signal, _onUpdate) {
         const name = params.name ?? "Resume";
+        const displayName = formatSubagentLabel(name);
         const startTime = Date.now();
 
         if (!isMuxAvailable()) {
@@ -1021,8 +1096,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Record entry count before resuming so we can extract new messages
         const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
 
-        const surface = createSurface(name);
-        await new Promise<void>((resolve) => setTimeout(resolve, 500));
+        const doneFile = join(
+          dirname(params.sessionPath),
+          `resume-${Date.now()}-${Math.random().toString(16).slice(2, 10)}.done`,
+        );
 
         // Build pi resume command
         const parts = ["pi", "--session", shellEscape(params.sessionPath)];
@@ -1037,23 +1114,32 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         let cleanupMsgFile: string | undefined;
         if (params.message) {
           const msgFile = join(tmpdir(), `subagent-resume-${Date.now()}.md`);
-          writeFileSync(msgFile, params.message, "utf8");
+          writeFileSync(msgFile, buildResumeFollowupMessage(params.message), "utf8");
           cleanupMsgFile = msgFile;
           parts.push(`@${msgFile}`);
         }
 
-        const command = `${parts.join(" ")}${cleanupMsgFile ? `; rm -f ${shellEscape(cleanupMsgFile)}` : ""}; echo '__SUBAGENT_DONE_'${exitStatusVar()}'__'`;
-        sendCommand(surface, command);
+        const envPrefix = buildPropagatedEnvPrefixParts().join(" ");
+        const commandPrefix = envPrefix ? `${envPrefix} ` : "";
+        const command = `${commandPrefix}${parts.join(" ")}${cleanupMsgFile ? `; rm -f ${shellEscape(cleanupMsgFile)}` : ""}; ${captureExitStatusCommand(doneFile)}`;
+        const muxBackend = getMuxBackend();
+        const surface =
+          muxBackend === "zellij" ? createSurface(displayName, command) : createSurface(displayName);
+        if (muxBackend !== "zellij") {
+          await new Promise<void>((resolve) => setTimeout(resolve, 500));
+          sendCommand(surface, command);
+        }
 
         // Register as a running subagent for widget tracking
         const id = Math.random().toString(16).slice(2, 10);
         const running: RunningSubagent = {
           id,
-          name,
+          name: displayName,
           task: params.message ?? "resumed session",
           surface,
           startTime,
           sessionFile: params.sessionPath,
+          doneFile,
         };
         runningSubagents.set(id, running);
         startWidgetRefresh();
@@ -1079,7 +1165,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                 content: `${summary}${sessionRef}`,
                 display: true,
                 details: {
-                  name,
+                  name: displayName,
                   task: params.message ?? "resumed session",
                   exitCode: result.exitCode,
                   elapsed: result.elapsed,
@@ -1104,7 +1190,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
         return {
           content: [{ type: "text", text: `Session "${name}" resumed.` }],
-          details: { id, name, sessionPath: params.sessionPath, status: "started" },
+          details: { id, name: displayName, sessionPath: params.sessionPath, status: "started" },
         };
       },
     });
@@ -1167,9 +1253,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             : (text: string) => theme.bg("toolErrorBg", text);
         const icon = exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
         const status = exitCode === 0 ? "completed" : `failed (exit ${exitCode})`;
-        const agentTag = details.agent ? theme.fg("dim", ` (${details.agent})`) : "";
 
-        const header = `${icon} ${theme.fg("toolTitle", theme.bold(name))}${agentTag} ${theme.fg("dim", "—")} ${status} ${theme.fg("dim", `(${elapsed})`)}`;
+        const header = `${icon} ${theme.fg("toolTitle", theme.bold(name))} ${theme.fg("dim", "—")} ${status} ${theme.fg("dim", `(${elapsed})`)}`;
         const rawContent = typeof message.content === "string" ? message.content : "";
 
         // Clean summary (remove session ref and leading label for display)

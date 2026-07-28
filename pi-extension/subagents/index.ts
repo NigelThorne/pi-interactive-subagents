@@ -899,12 +899,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       label: "List Subagents",
       description:
         "List all available subagent definitions. " +
-        "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
-        "Project-local agents override global ones with the same name.",
+        "Scans project-local .pi/agents/, version-controlled ~/.my-pi/agents/, and global ~/.pi/agent/agents/. " +
+        "Project-local agents override user/global/package agents with the same name.",
       promptSnippet:
         "List all available subagent definitions. " +
-        "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
-        "Project-local agents override global ones with the same name.",
+        "Scans project-local .pi/agents/, version-controlled ~/.my-pi/agents/, and global ~/.pi/agent/agents/. " +
+        "Project-local agents override user/global/package agents with the same name.",
       parameters: Type.Object({}),
 
       async execute() {
@@ -919,6 +919,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             source: "package",
           },
           { path: join(homedir(), ".pi", "agent", "agents"), source: "global" },
+          { path: join(homedir(), ".my-pi", "agents"), source: "my-pi" },
           { path: join(process.cwd(), ".pi", "agents"), source: "project" },
         ];
 

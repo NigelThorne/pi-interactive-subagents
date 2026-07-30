@@ -58,7 +58,7 @@ Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij` to force a specific backend.
 | `subagent`        | Spawn a sub-agent in a dedicated multiplexer pane (async — returns immediately) |
 | `subagents_list`  | List available agent definitions                                                |
 | `set_tab_title`   | Update tab/window title to show progress                                        |
-| `subagent_resume` | Resume a previous sub-agent session (async)                                     |
+| `subagent_resume` | Resume a previous sub-agent session (async); follow-up messages auto-append finish instructions |
 
 | Command                    | Description                          |
 | -------------------------- | ------------------------------------ |
@@ -77,11 +77,11 @@ Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij` to force a specific backend.
 
 | Agent             | Model                  | Role                                                                                     |
 | ----------------- | ---------------------- | ---------------------------------------------------------------------------------------- |
-| **planner**       | Opus (medium thinking) | Brainstorming — clarifies requirements, explores approaches, writes plans, creates todos |
-| **scout**         | Haiku                  | Fast codebase reconnaissance — maps files, patterns, conventions                         |
-| **worker**        | Sonnet                 | Implements tasks from todos — writes code, runs tests, makes polished commits            |
-| **reviewer**      | Opus (medium thinking) | Reviews code for bugs, security issues, correctness                                      |
-| **visual-tester** | Sonnet                 | Visual QA via Chrome CDP — screenshots, responsive testing, interaction testing          |
+| **planner**       | Codex GPT-5.4          | Brainstorming — clarifies requirements, explores approaches, writes plans, creates todos |
+| **scout**         | Codex GPT-5.4          | Fast codebase reconnaissance — maps files, patterns, conventions                         |
+| **worker**        | Codex GPT-5.4          | Implements tasks from todos — writes code, runs tests, makes polished commits            |
+| **reviewer**      | Codex GPT-5.4          | Reviews code for bugs, security issues, correctness                                      |
+| **visual-tester** | Codex GPT-5.4          | Visual QA via Chrome CDP — screenshots, responsive testing, interaction testing          |
 
 Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location.
 
@@ -220,6 +220,17 @@ You are a specialized agent that does X...
 | `cwd`         | string  | Default working directory (absolute or relative to project root)                                                                                                                                                                                                            |
 
 ---
+
+### `subagent_resume`
+
+When `subagent_resume` is given a follow-up `message`, that message is automatically wrapped with completion instructions so the resumed agent knows how to hand control back.
+
+**Behavior:**
+
+- The original follow-up request is preserved
+- Non-`auto-exit` resumed sessions are reminded to make their final assistant message a summary
+- Non-`auto-exit` resumed sessions are reminded to call `subagent_done` when finished
+- This prevents resumed follow-up sessions from stalling after doing the requested work
 
 ### `auto-exit`
 

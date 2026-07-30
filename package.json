@@ -13,7 +13,7 @@
   },
   "type": "module",
   "scripts": {
-    "test": "node --test test/test.ts"
+    "test": "npx --yes tsx --test test/test.ts"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",

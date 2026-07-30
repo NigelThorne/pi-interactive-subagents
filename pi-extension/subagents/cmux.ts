@@ -1,8 +1,17 @@
 import { execSync, execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
+import {
+  closePane as zellijClosePane,
+  createPaneInSameTab as zellijCreatePaneInSameTab,
+  ensureCurrentTabReadyForSubagents,
+  readScreen as zellijReadScreen,
+  readScreenAsync as zellijReadScreenAsync,
+  renameCurrentPane as zellijRenameCurrentPane,
+  renameCurrentTab as zellijRenameCurrentTab,
+  renameSession as zellijRenameSession,
+  sendCommand as zellijSendCommand,
+} from "./zellij.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -111,61 +120,23 @@ export function exitStatusVar(): string {
   return isFishShell() ? "$status" : "$?";
 }
 
+export function captureExitStatusCommand(filePath: string): string {
+  if (isFishShell()) {
+    return `set -l __pi_subagent_exit_status $status; printf '%s\\n' $__pi_subagent_exit_status > ${shellEscape(filePath)}; echo '__SUBAGENT_DONE_'$__pi_subagent_exit_status'__'`;
+  }
+  return `__pi_subagent_exit_status=$?; printf '%s\\n' "$__pi_subagent_exit_status" > ${shellEscape(filePath)}; echo '__SUBAGENT_DONE_'$__pi_subagent_exit_status'__'`;
+}
+
 export function shellEscape(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
-}
-
-function tailLines(text: string, lines: number): string {
-  const split = text.split("\n");
-  if (split.length <= lines) return text;
-  return split.slice(-lines).join("\n");
-}
-
-function zellijPaneId(surface: string): string {
-  return surface.startsWith("pane:") ? surface.slice("pane:".length) : surface;
-}
-
-function zellijEnv(surface?: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (surface) {
-    env.ZELLIJ_PANE_ID = zellijPaneId(surface);
-  }
-  return env;
-}
-
-function waitForFile(path: string, timeoutMs = 5000): string {
-  const sleeper = new Int32Array(new SharedArrayBuffer(4));
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (existsSync(path)) {
-      return readFileSync(path, "utf8").trim();
-    }
-    Atomics.wait(sleeper, 0, 0, 20);
-  }
-  throw new Error(`Timed out waiting for zellij pane id file: ${path}`);
-}
-
-function zellijActionSync(args: string[], surface?: string): string {
-  return execFileSync("zellij", ["action", ...args], {
-    encoding: "utf8",
-    env: zellijEnv(surface),
-  });
-}
-
-async function zellijActionAsync(args: string[], surface?: string): Promise<string> {
-  const { stdout } = await execFileAsync("zellij", ["action", ...args], {
-    encoding: "utf8",
-    env: zellijEnv(surface),
-  });
-  return stdout;
 }
 
 /**
  * Create a new terminal pane as a right split and set its title.
  * Returns an identifier (`surface:42` in cmux, `%12` in tmux, `pane:7` in zellij).
  */
-export function createSurface(name: string): string {
-  return createSurfaceSplit(name, "right");
+export function createSurface(name: string, command?: string): string {
+  return createSurfaceSplit(name, "right", undefined, command);
 }
 
 /**
@@ -176,6 +147,7 @@ export function createSurfaceSplit(
   name: string,
   direction: "left" | "right" | "up" | "down",
   fromSurface?: string,
+  command?: string,
 ): string {
   const backend = requireMuxBackend();
 
@@ -223,56 +195,50 @@ export function createSurfaceSplit(
     return pane;
   }
 
-  // zellij
-  const directionArg = direction === "left" || direction === "right" ? "right" : "down";
-  const tokenPath = join(
-    tmpdir(),
-    `pi-subagent-zellij-pane-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
-  );
-  const args = ["new-pane", "--direction", directionArg, "--name", name, "--cwd", process.cwd()];
+  return zellijCreatePaneInSameTab({
+    name,
+    direction,
+    fromSurface,
+    cwd: process.cwd(),
+    command,
+  });
+}
 
-  try {
-    zellijActionSync(args, fromSurface);
-  } catch {
-    if (!fromSurface) throw new Error("Failed to create zellij pane");
-    zellijActionSync(args);
+/**
+ * Ensure the current session is ready to orchestrate subagents.
+ * For zellij this reuses the current tab when it already belongs just to this
+ * pi session, otherwise it moves the current pi pane into a fresh tab via the
+ * local break-pane plugin and renames that tab.
+ */
+export function prepareForSubagents(title: string, ownedSurfaces: string[] = []): void {
+  const backend = requireMuxBackend();
+
+  if (backend === "zellij") {
+    ensureCurrentTabReadyForSubagents(title, ownedSurfaces);
+    return;
   }
 
-  // IMPORTANT: do not pass a long-running command to `new-pane`.
-  // zellij keeps the `action new-pane -- <cmd>` process attached until <cmd>
-  // exits. If <cmd> is an interactive shell, the parent call hangs forever.
-  // Instead, create a normal shell pane first, then ask the focused pane
-  // to print its own $ZELLIJ_PANE_ID into a temp file.
-  const captureIdCmd = `echo "$ZELLIJ_PANE_ID" > ${shellEscape(tokenPath)}`;
-  zellijActionSync(["write-chars", captureIdCmd]);
-  zellijActionSync(["write", "13"]);
+  renameCurrentTab(title);
+}
 
-  const paneId = waitForFile(tokenPath);
-  try {
-    rmSync(tokenPath, { force: true });
-  } catch {}
+/**
+ * Rename the current pane when supported.
+ */
+export function renameCurrentPane(title: string): void {
+  const backend = requireMuxBackend();
 
-  if (!paneId || !/^\d+$/.test(paneId)) {
-    throw new Error(`Unexpected zellij pane id: ${paneId || "(empty)"}`);
+  if (backend === "cmux") {
+    return;
   }
 
-  const surface = `pane:${paneId}`;
-
-  if (direction === "left" || direction === "up") {
-    try {
-      zellijActionSync(["move-pane", direction], surface);
-    } catch {
-      // Optional layout polish.
-    }
+  if (backend === "tmux") {
+    const paneId = process.env.TMUX_PANE;
+    if (!paneId) throw new Error("TMUX_PANE not set");
+    execFileSync("tmux", ["select-pane", "-t", paneId, "-T", title], { encoding: "utf8" });
+    return;
   }
 
-  try {
-    zellijActionSync(["rename-pane", name], surface);
-  } catch {
-    // Optional.
-  }
-
-  return surface;
+  zellijRenameCurrentPane(title);
 }
 
 /**
@@ -300,14 +266,30 @@ export function renameCurrentTab(title: string): void {
     return;
   }
 
-  zellijActionSync(["rename-tab", title]);
+  zellijRenameCurrentTab(title);
 }
 
 /**
  * Rename the current workspace/session where supported.
  */
+export function shouldRenameWorkspace(backend: MuxBackend): boolean {
+  if (backend === "tmux") {
+    return process.env.PI_SUBAGENT_RENAME_TMUX_SESSION === "1";
+  }
+
+  if (backend === "zellij") {
+    return false;
+  }
+
+  return true;
+}
+
 export function renameWorkspace(title: string): void {
   const backend = requireMuxBackend();
+
+  if (!shouldRenameWorkspace(backend)) {
+    return;
+  }
 
   if (backend === "cmux") {
     execSync(`cmux workspace-action --action rename --title ${shellEscape(title)}`, {
@@ -317,10 +299,6 @@ export function renameWorkspace(title: string): void {
   }
 
   if (backend === "tmux") {
-    if (process.env.PI_SUBAGENT_RENAME_TMUX_SESSION !== "1") {
-      return;
-    }
-
     const paneId = process.env.TMUX_PANE;
     if (!paneId) throw new Error("TMUX_PANE not set");
     const sessionId = execFileSync(
@@ -334,7 +312,7 @@ export function renameWorkspace(title: string): void {
     return;
   }
 
-  zellijActionSync(["rename-session", title]);
+  zellijRenameSession(title);
 }
 
 /**
@@ -356,8 +334,7 @@ export function sendCommand(surface: string, command: string): void {
     return;
   }
 
-  zellijActionSync(["write-chars", command], surface);
-  zellijActionSync(["write", "13"], surface);
+  zellijSendCommand(surface, command);
 }
 
 /**
@@ -382,19 +359,7 @@ export function readScreen(surface: string, lines = 50): string {
     );
   }
 
-  const tmpPath = join(
-    tmpdir(),
-    `pi-subagent-zellij-screen-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
-  );
-  try {
-    zellijActionSync(["dump-screen", tmpPath], surface);
-    const raw = readFileSync(tmpPath, "utf8");
-    return tailLines(raw, lines);
-  } finally {
-    try {
-      rmSync(tmpPath, { force: true });
-    } catch {}
-  }
+  return zellijReadScreen(surface, lines);
 }
 
 /**
@@ -421,19 +386,7 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
     return stdout;
   }
 
-  const tmpPath = join(
-    tmpdir(),
-    `pi-subagent-zellij-screen-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
-  );
-  try {
-    await zellijActionAsync(["dump-screen", tmpPath], surface);
-    const raw = readFileSync(tmpPath, "utf8");
-    return tailLines(raw, lines);
-  } finally {
-    try {
-      rmSync(tmpPath, { force: true });
-    } catch {}
-  }
+  return zellijReadScreenAsync(surface, lines);
 }
 
 /**
@@ -454,7 +407,7 @@ export function closeSurface(surface: string): void {
     return;
   }
 
-  zellijActionSync(["close-pane"], surface);
+  zellijClosePane(surface);
 }
 
 /**

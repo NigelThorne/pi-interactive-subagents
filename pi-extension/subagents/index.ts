@@ -145,6 +145,16 @@ function loadAgentDefaults(agentName: string): AgentDefaults | null {
   return null;
 }
 
+function isMyceliumOrchestratorSession(ctx: ExtensionContext): boolean {
+  // Prompt templates are persisted as user messages, not system-prompt text.
+  // The orchestration contract is deliberately a hard boundary: an
+  // orchestrator must create Mycelium work items and assign existing agents,
+  // never bypass the durable queue by launching coding subagents.
+  return ctx.sessionManager
+    .getEntries()
+    .some((entry) => JSON.stringify(entry).includes('You are the Mycelium **orchestrator**'));
+}
+
 function formatElapsed(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const m = Math.floor(seconds / 60);
@@ -738,6 +748,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        if (isMyceliumOrchestratorSession(ctx)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  "Blocked: this is a Mycelium orchestrator session. Create a durable Mycelium task, audit available agents, and assign the task through its work/activity thread with an explicit ACK request. Do not launch a coding subagent.",
+              },
+            ],
+            details: { error: "orchestrator subagent spawning blocked" },
+            isError: true,
+          };
+        }
+
         // Prevent self-spawning (e.g. planner spawning another planner)
         const currentAgent = process.env.PI_SUBAGENT_AGENT;
         if (params.agent && currentAgent && params.agent === currentAgent) {

@@ -242,7 +242,7 @@ interface RunningSubagent {
   sessionFile: string;
   doneFile: string;
   autoExit?: boolean;
-  entries?:
+  entries?: number;
   bytes?: number;
   forkCleanupFile?: string;
   abortController?: AbortController;

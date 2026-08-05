@@ -28,7 +28,12 @@ import {
   renameWorkspace,
 } from "./cmux.ts";
 import { buildCompletionInstructions, buildResumeFollowupMessage } from "./prompt.ts";
-import { getNewEntries, findLastAssistantMessage, readCompletionSummary } from "./session.ts";
+import {
+  getNewEntries,
+  findLastAssistantMessage,
+  readCompletionSummary,
+  hasCompletedAssistantTurn,
+} from "./session.ts";
 
 const SubagentParams = Type.Object({
   name: Type.String({ description: "Display name for the subagent" }),
@@ -236,7 +241,8 @@ interface RunningSubagent {
   startTime: number;
   sessionFile: string;
   doneFile: string;
-  entries?: number;
+  autoExit?: boolean;
+  entries?:
   bytes?: number;
   forkCleanupFile?: string;
   abortController?: AbortController;
@@ -570,6 +576,7 @@ async function launchSubagent(
     startTime,
     sessionFile: subagentSessionFile,
     doneFile: subagentDoneFile,
+    autoExit: agentDefs?.autoExit === true,
     forkCleanupFile,
   };
 
@@ -617,6 +624,19 @@ async function watchSubagent(
           }
         } catch {}
 
+        // `agent_end` can be skipped by some Pi runtimes. For an auto-exit
+        // agent, a normally completed assistant turn is therefore a second,
+        // parent-owned termination signal.
+        if (running.autoExit && existsSync(sessionFile)) {
+          try {
+            if (hasCompletedAssistantTurn(getNewEntries(sessionFile, 0))) {
+              closeSurface(surface);
+              resolve(0);
+              return;
+            }
+          } catch {}
+        }
+
         const timer = setTimeout(tick, 1000);
         signal.addEventListener(
           "abort",
@@ -650,7 +670,9 @@ async function watchSubagent(
           : "Sub-agent exited without output";
     }
 
-    closeSurface(surface);
+    try {
+      closeSurface(surface);
+    } catch {}
     runningSubagents.delete(running.id);
 
     try {
@@ -1173,6 +1195,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           startTime,
           sessionFile: params.sessionPath,
           doneFile,
+          autoExit: true,
         };
         runningSubagents.set(id, running);
         startWidgetRefresh();

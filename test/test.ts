@@ -13,6 +13,7 @@ import {
   copySessionFile,
   mergeNewEntries,
   readCompletionSummary,
+  hasCompletedAssistantTurn,
 } from "../pi-extension/subagents/session.ts";
 import {
   buildCompletionInstructions,
@@ -232,6 +233,17 @@ describe("session.ts", () => {
       assert.notEqual(copy, file);
       assert.ok(copy.endsWith(".jsonl"));
       assert.equal(readFileSync(copy, "utf8"), readFileSync(file, "utf8"));
+    });
+  });
+
+  describe("hasCompletedAssistantTurn", () => {
+    it("recognizes a completed text turn that auto-exit must close", () => {
+      const completed = {
+        ...ASSISTANT_MSG,
+        message: { ...ASSISTANT_MSG.message, stopReason: "stop" },
+      } as any;
+      assert.equal(hasCompletedAssistantTurn([USER_MSG as any, completed]), true);
+      assert.equal(hasCompletedAssistantTurn([USER_MSG as any, ASSISTANT_MSG as any]), false);
     });
   });
 

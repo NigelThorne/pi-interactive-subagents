@@ -270,10 +270,11 @@ describe("prompt.ts", () => {
       assert.doesNotMatch(prompt, /FINAL assistant message/);
     });
 
-    it("does not require subagent_done for auto-exit agents", () => {
+    it("requires explicit subagent_done even for auto-exit agents", () => {
       const prompt = buildCompletionInstructions({ autoExit: true });
-      assert.match(prompt, /include a concise summary/);
-      assert.doesNotMatch(prompt, /subagent_done/);
+      assert.match(prompt, /concise summary/);
+      assert.match(prompt, /call the `subagent_done` tool/);
+      assert.match(prompt, /Do not end the turn after only writing the summary/);
     });
   });
 

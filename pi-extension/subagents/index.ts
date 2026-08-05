@@ -415,9 +415,7 @@ async function launchSubagent(
   // When forking, the sub-agent already has the full conversation context.
   // Only send the user's task as a clean message — no wrapper instructions
   // that would confuse the agent into thinking it needs to restart.
-  const modeHint = agentDefs?.autoExit
-    ? "Complete your task autonomously."
-    : "Complete your task. The user can interact with you at any time.";
+  const modeHint = "Complete your task autonomously, then return control to the parent agent.";
   const completionInstructions = buildCompletionInstructions({ autoExit: agentDefs?.autoExit });
   const denySet = resolveDenyTools(agentDefs);
   const agentType = params.agent ?? params.name;

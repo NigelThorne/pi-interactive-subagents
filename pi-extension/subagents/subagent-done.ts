@@ -6,6 +6,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { writeFileSync } from "node:fs";
 
 export default function (pi: ExtensionAPI) {
   let toolNames: string[] = [];
@@ -117,8 +118,21 @@ export default function (pi: ExtensionAPI) {
       "Call this tool when you have completed your task. " +
       "It will close this session and return your results to the main session. " +
       "Your LAST assistant message before calling this becomes the summary returned to the caller.",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+    parameters: Type.Object({
+      summary: Type.Optional(
+        Type.String({
+          description:
+            "Concise verdict/result for the parent. Include findings, blockers, or what was completed.",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      // Pi may append a final "Done." assistant message after shutdown. Persist
+      // the model-supplied verdict out-of-band so the parent receives it exactly.
+      const summaryFile = process.env.PI_SUBAGENT_SUMMARY_FILE;
+      if (summaryFile && params.summary?.trim()) {
+        writeFileSync(summaryFile, params.summary.trim(), "utf8");
+      }
       ctx.shutdown();
       return {
         content: [{ type: "text", text: "Shutting down subagent session." }],

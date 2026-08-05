@@ -12,6 +12,7 @@ import {
   appendBranchSummary,
   copySessionFile,
   mergeNewEntries,
+  readCompletionSummary,
 } from "../pi-extension/subagents/session.ts";
 import {
   buildCompletionInstructions,
@@ -231,6 +232,18 @@ describe("session.ts", () => {
       assert.notEqual(copy, file);
       assert.ok(copy.endsWith(".jsonl"));
       assert.equal(readFileSync(copy, "utf8"), readFileSync(file, "utf8"));
+    });
+  });
+
+  describe("readCompletionSummary", () => {
+    it("uses the explicit completion sidecar instead of a trailing Done response", () => {
+      const doneFile = join(dir, "agent.done");
+      writeFileSync(`${doneFile}.summary`, "Critical finding: data loss remains.", "utf8");
+      assert.equal(readCompletionSummary(doneFile), "Critical finding: data loss remains.");
+    });
+
+    it("returns null when no explicit completion summary exists", () => {
+      assert.equal(readCompletionSummary(join(dir, "missing.done")), null);
     });
   });
 

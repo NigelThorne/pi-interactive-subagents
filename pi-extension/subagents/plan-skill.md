@@ -17,7 +17,7 @@ A planning workflow that offloads brainstorming and plan creation to a dedicated
 
 ## Tab Titles
 
-Use `set_tab_title` to keep the user informed of progress in the multiplexer UI. Update the title at every phase transition.
+When `set_tab_title` is available, use it to keep the user informed of progress in the Zellij UI. Update the title at every phase transition.
 
 | Phase         | Title example                                                  |
 | ------------- | -------------------------------------------------------------- |

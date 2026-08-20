@@ -15,6 +15,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import {
   isMuxAvailable,
+  isTabTitleSupported,
   muxSetupHint,
   getMuxBackend,
   createSurface,
@@ -28,7 +29,12 @@ import {
   renameWorkspace,
 } from "./cmux.ts";
 import { buildCompletionInstructions, buildResumeFollowupMessage } from "./prompt.ts";
-import { getNewEntries, findLastAssistantMessage } from "./session.ts";
+import {
+  getNewEntries,
+  findLastAssistantMessage,
+  readCompletionSummary,
+  hasCompletedAssistantTurn,
+} from "./session.ts";
 
 const SubagentParams = Type.Object({
   name: Type.String({ description: "Display name for the subagent" }),
@@ -236,6 +242,7 @@ interface RunningSubagent {
   startTime: number;
   sessionFile: string;
   doneFile: string;
+  autoExit?: boolean;
   entries?: number;
   bytes?: number;
   forkCleanupFile?: string;
@@ -415,13 +422,11 @@ async function launchSubagent(
   // When forking, the sub-agent already has the full conversation context.
   // Only send the user's task as a clean message — no wrapper instructions
   // that would confuse the agent into thinking it needs to restart.
-  const modeHint = agentDefs?.autoExit
-    ? "Complete your task autonomously."
-    : "Complete your task. The user can interact with you at any time.";
+  const modeHint = "Complete your task autonomously, then return control to the parent agent.";
   const completionInstructions = buildCompletionInstructions({ autoExit: agentDefs?.autoExit });
   const denySet = resolveDenyTools(agentDefs);
   const agentType = params.agent ?? params.name;
-  const tabTitleInstruction = denySet.has("set_tab_title")
+  const tabTitleInstruction = denySet.has("set_tab_title") || !isTabTitleSupported()
     ? ""
     : `As your FIRST action, set your title using set_tab_title. ` +
       `The title MUST start with [${agentType}] followed by a short description of your current task. ` +
@@ -500,6 +505,7 @@ async function launchSubagent(
     envParts.push(`PI_DENY_TOOLS=${shellEscape([...denySet].join(","))}`);
   }
   envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
+  envParts.push(`PI_SUBAGENT_SUMMARY_FILE=${shellEscape(`${subagentDoneFile}.summary`)}`);
   if (params.agent) {
     envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
   }
@@ -571,6 +577,7 @@ async function launchSubagent(
     startTime,
     sessionFile: subagentSessionFile,
     doneFile: subagentDoneFile,
+    autoExit: agentDefs?.autoExit === true,
     forkCleanupFile,
   };
 
@@ -618,6 +625,19 @@ async function watchSubagent(
           }
         } catch {}
 
+        // `agent_end` can be skipped by some Pi runtimes. For an auto-exit
+        // agent, a normally completed assistant turn is therefore a second,
+        // parent-owned termination signal.
+        if (running.autoExit && existsSync(sessionFile)) {
+          try {
+            if (hasCompletedAssistantTurn(getNewEntries(sessionFile, 0))) {
+              closeSurface(surface);
+              resolve(0);
+              return;
+            }
+          } catch {}
+        }
+
         const timer = setTimeout(tick, 1000);
         signal.addEventListener(
           "abort",
@@ -639,6 +659,7 @@ async function watchSubagent(
     if (existsSync(sessionFile)) {
       const allEntries = getNewEntries(sessionFile, 0);
       summary =
+        readCompletionSummary(doneFile) ??
         findLastAssistantMessage(allEntries) ??
         (exitCode !== 0
           ? `Sub-agent exited with code ${exitCode}`
@@ -650,11 +671,16 @@ async function watchSubagent(
           : "Sub-agent exited without output";
     }
 
-    closeSurface(surface);
+    try {
+      closeSurface(surface);
+    } catch {}
     runningSubagents.delete(running.id);
 
     try {
       unlinkSync(doneFile);
+    } catch {}
+    try {
+      unlinkSync(`${doneFile}.summary`);
     } catch {}
 
     // Clean up temp fork file
@@ -668,6 +694,9 @@ async function watchSubagent(
   } catch (err: any) {
     try {
       unlinkSync(doneFile);
+    } catch {}
+    try {
+      unlinkSync(`${doneFile}.summary`);
     } catch {}
     if (forkCleanupFile) {
       try {
@@ -1006,7 +1035,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     });
 
   // ── set_tab_title tool ──
-  if (shouldRegister("set_tab_title"))
+  if (shouldRegister("set_tab_title") && isTabTitleSupported())
     pi.registerTool({
       name: "set_tab_title",
       label: "Set Tab Title",
@@ -1144,7 +1173,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           parts.push(`@${msgFile}`);
         }
 
-        const envPrefix = buildPropagatedEnvPrefixParts().join(" ");
+        const resumeEnvParts = buildPropagatedEnvPrefixParts();
+        resumeEnvParts.push(`PI_SUBAGENT_SUMMARY_FILE=${shellEscape(`${doneFile}.summary`)}`);
+        const envPrefix = resumeEnvParts.join(" ");
         const commandPrefix = envPrefix ? `${envPrefix} ` : "";
         const command = `${commandPrefix}${parts.join(" ")}${cleanupMsgFile ? `; rm -f ${shellEscape(cleanupMsgFile)}` : ""}; ${captureExitStatusCommand(doneFile)}`;
         const muxBackend = getMuxBackend();
@@ -1165,6 +1196,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           startTime,
           sessionFile: params.sessionPath,
           doneFile,
+          autoExit: true,
         };
         runningSubagents.set(id, running);
         startWidgetRefresh();
@@ -1176,12 +1208,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         watchSubagent(running, watcherAbort.signal)
           .then((result) => {
             updateWidget();
-            const allEntries = getNewEntries(params.sessionPath, entryCountBefore);
-            const summary =
-              findLastAssistantMessage(allEntries) ??
-              (result.exitCode !== 0
-                ? `Resumed session exited with code ${result.exitCode}`
-                : "Resumed session exited without new output");
+            const summary = result.summary;
             const sessionRef = `\n\nSession: ${params.sessionPath}\nResume: pi --session ${params.sessionPath}`;
 
             pi.sendMessage(
@@ -1337,7 +1364,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       }
 
       // Rename workspace and tab to show this is a planning session
-      if (isMuxAvailable()) {
+      if (isTabTitleSupported()) {
         try {
           const label = task.length > 40 ? task.slice(0, 40) + "..." : task;
           renameWorkspace(`🎯 ${label}`);

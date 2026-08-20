@@ -12,6 +12,8 @@ import {
   appendBranchSummary,
   copySessionFile,
   mergeNewEntries,
+  readCompletionSummary,
+  hasCompletedAssistantTurn,
 } from "../pi-extension/subagents/session.ts";
 import {
   buildCompletionInstructions,
@@ -23,6 +25,7 @@ import {
   isCmuxAvailable,
   shouldRenameWorkspace,
 } from "../pi-extension/subagents/cmux.ts";
+import * as cmux from "../pi-extension/subagents/cmux.ts";
 import {
   canReuseTabForSubagents,
   encodePipeArgs,
@@ -234,6 +237,29 @@ describe("session.ts", () => {
     });
   });
 
+  describe("hasCompletedAssistantTurn", () => {
+    it("recognizes a completed text turn that auto-exit must close", () => {
+      const completed = {
+        ...ASSISTANT_MSG,
+        message: { ...ASSISTANT_MSG.message, stopReason: "stop" },
+      } as any;
+      assert.equal(hasCompletedAssistantTurn([USER_MSG as any, completed]), true);
+      assert.equal(hasCompletedAssistantTurn([USER_MSG as any, ASSISTANT_MSG as any]), false);
+    });
+  });
+
+  describe("readCompletionSummary", () => {
+    it("uses the explicit completion sidecar instead of a trailing Done response", () => {
+      const doneFile = join(dir, "agent.done");
+      writeFileSync(`${doneFile}.summary`, "Critical finding: data loss remains.", "utf8");
+      assert.equal(readCompletionSummary(doneFile), "Critical finding: data loss remains.");
+    });
+
+    it("returns null when no explicit completion summary exists", () => {
+      assert.equal(readCompletionSummary(join(dir, "missing.done")), null);
+    });
+  });
+
   describe("mergeNewEntries", () => {
     it("appends new entries from source to target", () => {
       // Source starts with same base (2 entries), then has 1 new entry
@@ -270,10 +296,11 @@ describe("prompt.ts", () => {
       assert.doesNotMatch(prompt, /FINAL assistant message/);
     });
 
-    it("does not require subagent_done for auto-exit agents", () => {
+    it("requires explicit subagent_done even for auto-exit agents", () => {
       const prompt = buildCompletionInstructions({ autoExit: true });
-      assert.match(prompt, /include a concise summary/);
-      assert.doesNotMatch(prompt, /subagent_done/);
+      assert.match(prompt, /concise summary/);
+      assert.match(prompt, /call the `subagent_done` tool/);
+      assert.match(prompt, /Do not end the turn after only writing the summary/);
     });
   });
 
@@ -372,6 +399,19 @@ describe("cmux.ts", () => {
   describe("shouldRenameWorkspace", () => {
     it("disables zellij session renames by default", () => {
       assert.equal(shouldRenameWorkspace("zellij"), false);
+    });
+  });
+
+  describe("isTabTitleSupported", () => {
+    it("only enables the title tool in a Zellij runtime", () => {
+      const isTabTitleSupported = (cmux as typeof cmux & {
+        isTabTitleSupported?: (backend: "cmux" | "tmux" | "zellij" | null) => boolean;
+      }).isTabTitleSupported;
+
+      assert.equal(isTabTitleSupported?.("zellij"), true);
+      assert.equal(isTabTitleSupported?.("cmux"), false);
+      assert.equal(isTabTitleSupported?.("tmux"), false);
+      assert.equal(isTabTitleSupported?.(null), false);
     });
   });
 });

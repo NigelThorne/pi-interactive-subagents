@@ -1,11 +1,9 @@
-export function buildCompletionInstructions(options?: { autoExit?: boolean }): string {
-  if (options?.autoExit) {
-    return "Before finishing your turn, include a concise summary of what you accomplished.";
-  }
-
+export function buildCompletionInstructions(_options?: { autoExit?: boolean }): string {
+  // `agent_end` is not reliable enough as the sole completion signal across
+  // Pi runtimes. Every interactive subagent must explicitly close itself.
   return [
     "Before finishing your turn, send a concise summary of what you accomplished.",
-    "Immediately after that summary, call the `subagent_done` tool to return control to the parent agent.",
+    "Immediately after that summary, call the `subagent_done` tool with a `summary` argument containing the same concise verdict, to return control to the parent agent.",
     "Do not end the turn after only writing the summary; the `subagent_done` tool call is required.",
   ].join("\n");
 }

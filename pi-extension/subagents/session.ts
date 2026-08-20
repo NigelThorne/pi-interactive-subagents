@@ -1,4 +1,4 @@
-import { readFileSync, appendFileSync, copyFileSync } from "node:fs";
+import { readFileSync, appendFileSync, copyFileSync, existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
@@ -48,6 +48,27 @@ export function getNewEntries(sessionFile: string, afterLine: number): SessionEn
   const raw = readFileSync(sessionFile, "utf8");
   const lines = raw.split("\n").filter((line) => line.trim());
   return lines.slice(afterLine).map((line) => JSON.parse(line) as SessionEntry);
+}
+
+/**
+ * Whether the last session entry is an assistant turn that ended normally.
+ * Auto-exit workers must not remain idle after this terminal state.
+ */
+export function hasCompletedAssistantTurn(entries: SessionEntry[]): boolean {
+  const last = entries.at(-1) as (MessageEntry & { message?: { stopReason?: string } }) | undefined;
+  return last?.type === "message" && last.message?.role === "assistant" && last.message.stopReason === "stop";
+}
+
+/**
+ * Read the explicit summary written by the subagent_done tool. This survives
+ * Pi's trailing final answer (often just "Done.") after shutdown.
+ */
+export function readCompletionSummary(doneFile: string): string | null {
+  const summaryFile = `${doneFile}.summary`;
+  if (!existsSync(summaryFile)) return null;
+
+  const summary = readFileSync(summaryFile, "utf8").trim();
+  return summary || null;
 }
 
 /**

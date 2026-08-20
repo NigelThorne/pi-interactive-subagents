@@ -26,7 +26,7 @@ subagent({ name: "Scout: DB", agent: "scout", task: "Map database schema" });
 ## Install
 
 ```bash
-pi install git:github.com/HazAT/pi-interactive-subagents
+pi install git:github.com/NigelThorne/pi-interactive-subagents
 ```
 
 Supported multiplexers:

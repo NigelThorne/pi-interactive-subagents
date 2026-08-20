@@ -15,6 +15,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import {
   isMuxAvailable,
+  isTabTitleSupported,
   muxSetupHint,
   getMuxBackend,
   createSurface,
@@ -425,7 +426,7 @@ async function launchSubagent(
   const completionInstructions = buildCompletionInstructions({ autoExit: agentDefs?.autoExit });
   const denySet = resolveDenyTools(agentDefs);
   const agentType = params.agent ?? params.name;
-  const tabTitleInstruction = denySet.has("set_tab_title")
+  const tabTitleInstruction = denySet.has("set_tab_title") || !isTabTitleSupported()
     ? ""
     : `As your FIRST action, set your title using set_tab_title. ` +
       `The title MUST start with [${agentType}] followed by a short description of your current task. ` +
@@ -1034,7 +1035,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     });
 
   // ── set_tab_title tool ──
-  if (shouldRegister("set_tab_title"))
+  if (shouldRegister("set_tab_title") && isTabTitleSupported())
     pi.registerTool({
       name: "set_tab_title",
       label: "Set Tab Title",
@@ -1363,7 +1364,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       }
 
       // Rename workspace and tab to show this is a planning session
-      if (isMuxAvailable()) {
+      if (isTabTitleSupported()) {
         try {
           const label = task.length > 40 ? task.slice(0, 40) + "..." : task;
           renameWorkspace(`🎯 ${label}`);

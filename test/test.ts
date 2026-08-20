@@ -25,6 +25,7 @@ import {
   isCmuxAvailable,
   shouldRenameWorkspace,
 } from "../pi-extension/subagents/cmux.ts";
+import * as cmux from "../pi-extension/subagents/cmux.ts";
 import {
   canReuseTabForSubagents,
   encodePipeArgs,
@@ -398,6 +399,19 @@ describe("cmux.ts", () => {
   describe("shouldRenameWorkspace", () => {
     it("disables zellij session renames by default", () => {
       assert.equal(shouldRenameWorkspace("zellij"), false);
+    });
+  });
+
+  describe("isTabTitleSupported", () => {
+    it("only enables the title tool in a Zellij runtime", () => {
+      const isTabTitleSupported = (cmux as typeof cmux & {
+        isTabTitleSupported?: (backend: "cmux" | "tmux" | "zellij" | null) => boolean;
+      }).isTabTitleSupported;
+
+      assert.equal(isTabTitleSupported?.("zellij"), true);
+      assert.equal(isTabTitleSupported?.("cmux"), false);
+      assert.equal(isTabTitleSupported?.("tmux"), false);
+      assert.equal(isTabTitleSupported?.(null), false);
     });
   });
 });

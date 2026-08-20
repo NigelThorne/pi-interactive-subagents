@@ -57,7 +57,7 @@ Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij` to force a specific backend.
 | ----------------- | ------------------------------------------------------------------------------- |
 | `subagent`        | Spawn a sub-agent in a dedicated multiplexer pane (async — returns immediately) |
 | `subagents_list`  | List available agent definitions                                                |
-| `set_tab_title`   | Update tab/window title to show progress                                        |
+| `set_tab_title`   | Update tab/window title to show progress (Zellij only)                          |
 | `subagent_resume` | Resume a previous sub-agent session (async); follow-up messages auto-append finish instructions |
 
 | Command                    | Description                          |

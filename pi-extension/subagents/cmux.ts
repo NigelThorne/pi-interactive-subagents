@@ -82,6 +82,14 @@ export function isMuxAvailable(): boolean {
   return getMuxBackend() !== null;
 }
 
+/**
+ * `set_tab_title` relies on Zellij's stable pane/tab targeting. Do not expose
+ * it in other terminals, where a failed rename can terminate the Pi process.
+ */
+export function isTabTitleSupported(backend: MuxBackend | null = getMuxBackend()): boolean {
+  return backend === "zellij";
+}
+
 export function muxSetupHint(): string {
   const pref = muxPreference();
   if (pref === "cmux") {

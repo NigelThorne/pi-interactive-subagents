@@ -571,7 +571,7 @@ async function launchSubagent(
   const surfacePreCreated = !!options?.surface;
   const muxBackend = getMuxBackend();
   if (muxBackend === "zellij" && !process.env.PI_SUBAGENT_NAME) {
-    prepareForSubagents(`π ${displayName}`, [...runningSubagents.values()].map((subagent) => subagent.surface));
+    prepareForSubagents(`π ${displayName}`);
   }
   const surface =
     options?.surface ??

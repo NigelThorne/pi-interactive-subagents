@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -23,17 +23,14 @@ import {
 } from "../pi-extension/subagents/prompt.ts";
 
 import {
+  createSurface,
   shellEscape,
   isCmuxAvailable,
+  prepareForSubagents,
   shouldRenameWorkspace,
 } from "../pi-extension/subagents/cmux.ts";
 import * as cmux from "../pi-extension/subagents/cmux.ts";
-import {
-  canReuseTabForSubagents,
-  encodePipeArgs,
-  normalizePaneId,
-  paneSurface,
-} from "../pi-extension/subagents/zellij.ts";
+import { normalizePaneId, paneSurface } from "../pi-extension/subagents/zellij.ts";
 
 // --- Helpers ---
 
@@ -406,32 +403,6 @@ describe("zellij.ts", () => {
     });
   });
 
-  describe("canReuseTabForSubagents", () => {
-    it("allows a tab with just the main pane", () => {
-      assert.equal(canReuseTabForSubagents("5", ["5"], []), true);
-    });
-
-    it("allows a tab with only owned subagent panes", () => {
-      assert.equal(canReuseTabForSubagents("5", ["5", "6", "7"], ["pane:6", "terminal_7"]), true);
-    });
-
-    it("rejects unrelated panes", () => {
-      assert.equal(canReuseTabForSubagents("5", ["5", "9"], ["pane:6"]), false);
-    });
-  });
-
-  describe("encodePipeArgs", () => {
-    it("encodes all args in a single comma-separated string", () => {
-      assert.equal(
-        encodePipeArgs({ pane_id: 0, pane_kind: "terminal", focus: true }),
-        "pane_id=0,pane_kind=terminal,focus=true",
-      );
-    });
-
-    it("skips undefined values", () => {
-      assert.equal(encodePipeArgs({ pane_id: 0, tab_name: undefined }), "pane_id=0");
-    });
-  });
 });
 
 describe("cmux.ts", () => {
@@ -455,6 +426,55 @@ describe("cmux.ts", () => {
       assert.ok(escaped.endsWith("'"));
       // Inside single quotes, everything is literal
       assert.ok(escaped.includes("$world"));
+    });
+  });
+
+  describe("prepareForSubagents", () => {
+    it("keeps a Zellij main pane in its current tab when unrelated panes are present", () => {
+      const binDir = createTestDir();
+      const zellijLog = join(binDir, "zellij.log");
+      const zellijPath = join(binDir, "zellij");
+      writeFileSync(
+        zellijPath,
+        `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(zellijLog)}
+case "$2" in
+  list-panes) printf '[{"id":1,"tab_id":2,"is_plugin":false},{"id":3,"tab_id":2,"is_plugin":false}]' ;;
+  list-tabs) printf '[{"tab_id":2,"position":0,"name":"shared"}]' ;;
+  new-pane) printf '4' ;;
+esac
+`,
+      );
+      chmodSync(zellijPath, 0o755);
+
+      const original = {
+        PATH: process.env.PATH,
+        PI_SUBAGENT_MUX: process.env.PI_SUBAGENT_MUX,
+        PI_ZELLIJ_BREAK_PLUGIN: process.env.PI_ZELLIJ_BREAK_PLUGIN,
+        ZELLIJ: process.env.ZELLIJ,
+        ZELLIJ_PANE_ID: process.env.ZELLIJ_PANE_ID,
+      };
+      process.env.PATH = `${binDir}:${original.PATH ?? ""}`;
+      process.env.PI_SUBAGENT_MUX = "zellij";
+      process.env.PI_ZELLIJ_BREAK_PLUGIN = join(binDir, "missing-break-plugin.wasm");
+      process.env.ZELLIJ = "test";
+      process.env.ZELLIJ_PANE_ID = "1";
+
+      try {
+        assert.doesNotThrow(() => prepareForSubagents("π worker"));
+        assert.equal(createSurface("worker"), "pane:4");
+
+        const actions = readFileSync(zellijLog, "utf8");
+        assert.match(actions, /rename-tab --tab-id 2 π worker/);
+        assert.match(actions, /new-pane --tab-id 2 --direction right --name worker/);
+        assert.doesNotMatch(actions, /launch-plugin|go-to-tab-by-id/);
+      } finally {
+        for (const [key, value] of Object.entries(original)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+        rmSync(binDir, { recursive: true, force: true });
+      }
     });
   });
 

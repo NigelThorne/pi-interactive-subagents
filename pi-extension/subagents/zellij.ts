@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -69,18 +69,6 @@ function shellCommandArgs(command: string): string[] {
   return [shell, "-lc", command];
 }
 
-const DEFAULT_BREAK_PLUGIN_PATH = join(
-  homedir(),
-  ".config",
-  "zellij",
-  "plugins",
-  "pi-break-pane",
-  "target",
-  "wasm32-wasip1",
-  "release",
-  "pi-break-pane.wasm",
-);
-
 function currentPaneSurface(): string {
   const paneId = process.env.ZELLIJ_PANE_ID?.trim();
   if (!paneId) {
@@ -91,21 +79,6 @@ function currentPaneSurface(): string {
 
 function sleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-export function breakPluginPath(): string {
-  return (process.env.PI_ZELLIJ_BREAK_PLUGIN ?? DEFAULT_BREAK_PLUGIN_PATH).trim();
-}
-
-export function breakPluginUrl(): string {
-  return `file:${breakPluginPath()}`;
-}
-
-export function encodePipeArgs(args: Record<string, string | number | boolean | undefined>): string {
-  return Object.entries(args)
-    .filter(([, value]) => value !== undefined)
-    .map(([key, value]) => `${key}=${String(value)}`)
-    .join(",");
 }
 
 function selectablePaneIdsForTab(tabId: number, panes: ZellijPaneInfo[]): string[] {
@@ -137,19 +110,6 @@ export function listTabs(): ZellijTabInfo[] {
 
 export function getCurrentTabInfo(): ZellijTabInfo {
   return getTabInfoForPane(currentPaneSurface());
-}
-
-export function createTab(name: string): number {
-  const created = actionSync(["new-tab", "--name", name], currentPaneSurface()).trim();
-  const parsed = Number.parseInt(created, 10);
-  if (Number.isNaN(parsed)) {
-    throw new Error(`Unexpected zellij tab id: ${created || "(empty)"}`);
-  }
-  return parsed;
-}
-
-export function focusTab(tabId: number): void {
-  actionSync(["go-to-tab-by-id", String(tabId)], currentPaneSurface());
 }
 
 export function getPaneInfo(surface: string): ZellijPaneInfo {
@@ -203,95 +163,6 @@ export function renameTabForPane(surface: string, title: string): void {
 
 export function renameSession(title: string): void {
   actionSync(["rename-session", title], currentPaneSurface());
-}
-
-export function canReuseTabForSubagents(
-  currentPaneId: string,
-  selectablePaneIds: string[],
-  ownedPaneIds: Iterable<string>,
-): boolean {
-  const allowed = new Set<string>([normalizePaneId(currentPaneId)]);
-  for (const ownedPaneId of ownedPaneIds) {
-    allowed.add(normalizePaneId(String(ownedPaneId)));
-  }
-  return selectablePaneIds.every((paneId) => allowed.has(normalizePaneId(paneId)));
-}
-
-export function breakPaneToNewTab(surface: string): number {
-  const paneId = normalizePaneId(surface);
-  const pluginPath = breakPluginPath();
-  if (!existsSync(pluginPath)) {
-    throw new Error(
-      `Zellij break-pane plugin not found at ${pluginPath}. ` +
-        "Build/install ~/.config/zellij/plugins/pi-break-pane first.",
-    );
-  }
-
-  const startingTabId = getTabIdForPane(surface);
-  const pluginUrl = breakPluginUrl();
-
-  // `launch-plugin` targets the active client tab, so make sure the source
-  // pane's tab is active first.
-  focusTab(startingTabId);
-
-  // IMPORTANT: do not use `zellij pipe` here.
-  // On Zellij 0.44.1 the CLI can stay blocked indefinitely, which hangs the
-  // parent pi tool call. `action launch-plugin` returns immediately.
-  actionSync(
-    [
-      "launch-plugin",
-      "--skip-plugin-cache",
-      pluginUrl,
-      "--tab-id",
-      String(startingTabId),
-      "--floating",
-      "--configuration",
-      `pane_id=${paneId},pane_kind=terminal,focus=true`,
-    ],
-    surface,
-  );
-
-  const start = Date.now();
-  while (Date.now() - start < 5000) {
-    const nextTabId = getTabIdForPane(surface);
-    if (nextTabId !== startingTabId) {
-      return nextTabId;
-    }
-    sleep(25);
-  }
-
-  const waitingPlugin = listPanes().find(
-    (pane) => pane.is_plugin && pane.plugin_url === pluginUrl && pane.tab_id === startingTabId,
-  );
-  if (waitingPlugin) {
-    throw new Error(
-      `Timed out waiting for zellij to move pane ${paneId} into a new tab. ` +
-        `The pi-break-pane plugin is still open in tab ${startingTabId}, which usually means its permissions were not granted yet in this Zellij session. ` +
-        `Grant ChangeApplicationState + ReadCliPipes for ${pluginUrl} (or pre-populate ~/.cache/zellij/permissions.kdl and restart Zellij), then retry.`,
-    );
-  }
-
-  throw new Error(`Timed out waiting for zellij to move pane ${paneId} into a new tab`);
-}
-
-export function ensureCurrentTabReadyForSubagents(
-  title: string,
-  ownedSurfaces: string[] = [],
-): { tabId: number; reused: boolean } {
-  const currentSurface = currentPaneSurface();
-  const currentPaneId = normalizePaneId(currentSurface);
-  const currentTab = getCurrentTabInfo();
-  const currentPanes = selectablePaneIdsForTab(currentTab.tab_id, listPanes());
-  const ownedPaneIds = ownedSurfaces.map((surface) => normalizePaneId(surface));
-
-  if (canReuseTabForSubagents(currentPaneId, currentPanes, ownedPaneIds)) {
-    renameTab(currentTab.tab_id, title, currentSurface);
-    return { tabId: currentTab.tab_id, reused: true };
-  }
-
-  const newTabId = breakPaneToNewTab(currentSurface);
-  renameTab(newTabId, title, currentSurface);
-  return { tabId: newTabId, reused: false };
 }
 
 export function createPaneInSameTab(options: {

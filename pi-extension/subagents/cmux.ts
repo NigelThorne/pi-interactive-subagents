@@ -4,7 +4,6 @@ import { basename } from "node:path";
 import {
   closePane as zellijClosePane,
   createPaneInSameTab as zellijCreatePaneInSameTab,
-  ensureCurrentTabReadyForSubagents,
   readScreen as zellijReadScreen,
   readScreenAsync as zellijReadScreenAsync,
   renameCurrentPane as zellijRenameCurrentPane,
@@ -213,19 +212,10 @@ export function createSurfaceSplit(
 }
 
 /**
- * Ensure the current session is ready to orchestrate subagents.
- * For zellij this reuses the current tab when it already belongs just to this
- * pi session, otherwise it moves the current pi pane into a fresh tab via the
- * local break-pane plugin and renames that tab.
+ * Label the current tab before spawning subagents. Subagent panes are always
+ * created in the main pi pane's existing tab.
  */
-export function prepareForSubagents(title: string, ownedSurfaces: string[] = []): void {
-  const backend = requireMuxBackend();
-
-  if (backend === "zellij") {
-    ensureCurrentTabReadyForSubagents(title, ownedSurfaces);
-    return;
-  }
-
+export function prepareForSubagents(title: string): void {
   renameCurrentTab(title);
 }
 

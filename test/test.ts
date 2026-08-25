@@ -14,6 +14,8 @@ import {
   mergeNewEntries,
   readCompletionSummary,
   hasCompletedAssistantTurn,
+  precreateChildSessionFile,
+  buildSubagentChildManifestData,
 } from "../pi-extension/subagents/session.ts";
 import {
   buildCompletionInstructions,
@@ -282,6 +284,74 @@ describe("session.ts", () => {
       // Target should now have 3 entries
       const targetLines = readFileSync(targetFile, "utf8").trim().split("\n");
       assert.equal(targetLines.length, 3);
+    });
+  });
+
+  describe("precreateChildSessionFile", () => {
+    it("writes a header with parent session and effective cwd", () => {
+      const file = join(dir, "child-session.jsonl");
+      const timestamp = "2026-08-25T01:02:03.456Z";
+
+      precreateChildSessionFile(file, {
+        sessionId: "child-session-123",
+        timestamp,
+        cwd: "/tmp/child-cwd",
+        parentSession: "/tmp/parent-session.jsonl",
+      });
+
+      const lines = readFileSync(file, "utf8").trim().split("\n");
+      assert.equal(lines.length, 1);
+
+      const header = JSON.parse(lines[0]);
+      assert.deepEqual(header, {
+        type: "session",
+        version: 3,
+        id: "child-session-123",
+        timestamp,
+        cwd: "/tmp/child-cwd",
+        parentSession: "/tmp/parent-session.jsonl",
+      });
+    });
+
+    it("uses exclusive write mode and never overwrites an existing file", () => {
+      const file = join(dir, "existing-child-session.jsonl");
+      writeFileSync(file, "original\n", "utf8");
+
+      assert.throws(
+        () =>
+          precreateChildSessionFile(file, {
+            sessionId: "child-session-456",
+            timestamp: "2026-08-25T01:02:03.456Z",
+            cwd: "/tmp/other-cwd",
+            parentSession: "/tmp/other-parent.jsonl",
+          }),
+        (error: any) => error?.code === "EEXIST",
+      );
+      assert.equal(readFileSync(file, "utf8"), "original\n");
+    });
+  });
+
+  describe("buildSubagentChildManifestData", () => {
+    it("returns durable lineage data for the parent session entry", () => {
+      assert.deepEqual(
+        buildSubagentChildManifestData({
+          id: "subagent-1",
+          name: "Worker",
+          agent: "worker",
+          startTimestamp: "2026-08-25T01:02:03.456Z",
+          childSessionPath: "/tmp/child.jsonl",
+          parentSessionPath: "/tmp/parent.jsonl",
+        }),
+        {
+          id: "subagent-1",
+          name: "Worker",
+          agent: "worker",
+          startTimestamp: "2026-08-25T01:02:03.456Z",
+          childSessionPath: "/tmp/child.jsonl",
+          parentSessionPath: "/tmp/parent.jsonl",
+          status: "started",
+        },
+      );
     });
   });
 });

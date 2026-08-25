@@ -1,6 +1,15 @@
-import { readFileSync, appendFileSync, copyFileSync, existsSync } from "node:fs";
+import {
+  readFileSync,
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+
+export const SESSION_FILE_VERSION = 3;
 
 export interface SessionEntry {
   type: string;
@@ -14,6 +23,75 @@ export interface MessageEntry extends SessionEntry {
   message: {
     role: "user" | "assistant" | "toolResult";
     content: Array<{ type: string; text?: string; [key: string]: unknown }>;
+  };
+}
+
+export interface ChildSessionHeader {
+  type: "session";
+  version: number;
+  id: string;
+  timestamp: string;
+  cwd: string;
+  parentSession: string;
+}
+
+export interface SubagentChildManifestData {
+  id: string;
+  name: string;
+  agent: string | null;
+  startTimestamp: string;
+  childSessionPath: string;
+  parentSessionPath: string;
+  status: "started";
+}
+
+export function buildChildSessionHeader(params: {
+  sessionId: string;
+  timestamp: string;
+  cwd: string;
+  parentSession: string;
+}): ChildSessionHeader {
+  return {
+    type: "session",
+    version: SESSION_FILE_VERSION,
+    id: params.sessionId,
+    timestamp: params.timestamp,
+    cwd: params.cwd,
+    parentSession: params.parentSession,
+  };
+}
+
+export function precreateChildSessionFile(
+  sessionFile: string,
+  params: {
+    sessionId: string;
+    timestamp: string;
+    cwd: string;
+    parentSession: string;
+  },
+): ChildSessionHeader {
+  const header = buildChildSessionHeader(params);
+  mkdirSync(dirname(sessionFile), { recursive: true });
+  writeFileSync(sessionFile, JSON.stringify(header) + "\n", { encoding: "utf8", flag: "wx" });
+  return header;
+}
+
+export function buildSubagentChildManifestData(params: {
+  id: string;
+  name: string;
+  agent?: string;
+  startTimestamp: string;
+  childSessionPath: string;
+  parentSessionPath: string;
+}): SubagentChildManifestData {
+  return {
+    id: params.id,
+    name: params.name,
+    agent: params.agent ?? null,
+    startTimestamp: params.startTimestamp,
+    childSessionPath: params.childSessionPath,
+    parentSessionPath: params.parentSessionPath,
+    status: "started",
   };
 }
 
@@ -142,4 +220,3 @@ export function mergeNewEntries(
   }
   return entries;
 }
-const unused = "hello";

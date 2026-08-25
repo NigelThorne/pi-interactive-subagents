@@ -34,6 +34,8 @@ import {
   findLastAssistantMessage,
   readCompletionSummary,
   hasCompletedAssistantTurn,
+  precreateChildSessionFile,
+  buildSubagentChildManifestData,
 } from "./session.ts";
 
 const SubagentParams = Type.Object({
@@ -242,6 +244,7 @@ interface RunningSubagent {
   startTime: number;
   sessionFile: string;
   doneFile: string;
+  lineageData: ReturnType<typeof buildSubagentChildManifestData>;
   autoExit?: boolean;
   entries?: number;
   bytes?: number;
@@ -391,6 +394,7 @@ async function launchSubagent(
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
+  const startTimestamp = new Date(startTime).toISOString();
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
@@ -407,7 +411,7 @@ async function launchSubagent(
   // Generate a deterministic session file path for this subagent.
   // This eliminates race conditions when multiple agents launch simultaneously —
   // each agent knows exactly which file is theirs.
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23) + "Z";
+  const timestamp = startTimestamp.replace(/[:.]/g, "-").slice(0, 23) + "Z";
   const uuid = [
     id,
     Math.random().toString(16).slice(2, 10),
@@ -417,6 +421,23 @@ async function launchSubagent(
   const subagentSessionFile = join(sessionDir, `${timestamp}_${uuid}.jsonl`);
   const subagentDoneFile = join(sessionDir, `${timestamp}_${uuid}.done`);
   const displayName = formatSubagentLabel(params.name, params.agent);
+
+  // Resolve cwd — param overrides agent default, supports absolute and relative paths.
+  // Persist the actual child cwd in the precreated header and force the pane command
+  // to start there so the durable header matches runtime reality.
+  const rawCwd = params.cwd ?? agentDefs?.cwd ?? null;
+  const effectiveCwd = rawCwd
+    ? rawCwd.startsWith("/")
+      ? rawCwd
+      : join(ctx.cwd, rawCwd)
+    : ctx.cwd;
+
+  precreateChildSessionFile(subagentSessionFile, {
+    sessionId: uuid,
+    timestamp: startTimestamp,
+    cwd: effectiveCwd,
+    parentSession: sessionFile,
+  });
 
   // Build the task message
   // When forking, the sub-agent already has the full conversation context.
@@ -505,6 +526,7 @@ async function launchSubagent(
     envParts.push(`PI_DENY_TOOLS=${shellEscape([...denySet].join(","))}`);
   }
   envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
+  envParts.push(`PI_SUBAGENT_PARENT_SESSION=${shellEscape(sessionFile)}`);
   envParts.push(`PI_SUBAGENT_SUMMARY_FILE=${shellEscape(`${subagentDoneFile}.summary`)}`);
   if (params.agent) {
     envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
@@ -538,14 +560,7 @@ async function launchSubagent(
     parts.push(`@${artifactPath}`);
   }
 
-  // Resolve cwd — param overrides agent default, supports absolute and relative paths
-  const rawCwd = params.cwd ?? agentDefs?.cwd ?? null;
-  const effectiveCwd = rawCwd
-    ? rawCwd.startsWith("/")
-      ? rawCwd
-      : join(process.cwd(), rawCwd)
-    : null;
-  const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
+  const cdPrefix = `cd ${shellEscape(effectiveCwd)} && `;
 
   const piCommand = cdPrefix + envPrefix + parts.join(" ");
   const command = `${piCommand}; ${captureExitStatusCommand(subagentDoneFile)}`;
@@ -577,6 +592,14 @@ async function launchSubagent(
     startTime,
     sessionFile: subagentSessionFile,
     doneFile: subagentDoneFile,
+    lineageData: buildSubagentChildManifestData({
+      id,
+      name: displayName,
+      agent: params.agent,
+      startTimestamp,
+      childSessionPath: subagentSessionFile,
+      parentSessionPath: sessionFile,
+    }),
     autoExit: agentDefs?.autoExit === true,
     forkCleanupFile,
   };
@@ -824,6 +847,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
         // Launch the subagent (creates pane, sends command)
         const running = await launchSubagent(params, ctx);
+        pi.appendEntry("subagent_child", running.lineageData);
 
         // Create a separate AbortController for the watcher
         // (the tool's signal completes when we return)

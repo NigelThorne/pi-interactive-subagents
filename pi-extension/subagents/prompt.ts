@@ -8,6 +8,14 @@ export function buildCompletionInstructions(_options?: { autoExit?: boolean }): 
   ].join("\n");
 }
 
+export function buildParentCompletionHandoffInstructions(): string {
+  return [
+    "A subagent returns its completion summary automatically as a steer message.",
+    "Do not block the parent session. Do not run `sleep` or manually poll logs, worktrees, panes, or session files for completion.",
+    "Do unrelated bounded work if any remains. End the turn if no independent work remains, so the parent stays available for user messages.",
+  ].join(" ");
+}
+
 export function buildResumeFollowupMessage(message: string): string {
   return `${message}\n\nWhen you complete this follow-up:\n${buildCompletionInstructions()}\nDo not wait for further input once finished.`;
 }

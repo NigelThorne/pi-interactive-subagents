@@ -28,7 +28,12 @@ import {
   renameCurrentTab,
   renameWorkspace,
 } from "./cmux.ts";
-import { buildCompletionInstructions, buildResumeFollowupMessage } from "./prompt.ts";
+import {
+  buildCompletionInstructions,
+  buildParentCompletionHandoffInstructions,
+  buildResumeFollowupMessage,
+} from "./prompt.ts";
+import { steerRunningSubagent } from "./steering.ts";
 import {
   getNewEntries,
   findLastAssistantMessage,
@@ -788,15 +793,15 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       description:
         "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
         "IMPORTANT: This tool returns IMMEDIATELY — the sub-agent runs asynchronously in the background. " +
-        "You will NOT have results when this tool returns. Results are delivered later via a steer message. " +
+        "You will NOT have results when this tool returns. " +
         "Do NOT fabricate, assume, or summarize results after calling this tool. " +
-        "Either wait for the steer message or move on to other work.",
+        buildParentCompletionHandoffInstructions(),
       promptSnippet:
         "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
         "IMPORTANT: This tool returns IMMEDIATELY — the sub-agent runs asynchronously in the background. " +
-        "You will NOT have results when this tool returns. Results are delivered later via a steer message. " +
+        "You will NOT have results when this tool returns. " +
         "Do NOT fabricate, assume, or summarize results after calling this tool. " +
-        "Either wait for the steer message or move on to other work.",
+        buildParentCompletionHandoffInstructions(),
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -906,9 +911,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               type: "text",
               text:
                 `Sub-agent "${running.name}" launched and is now running in the background. ` +
-                `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
-                `The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
-                `Until then, move on to other work or tell the user you're waiting.`,
+                "Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. " +
+                buildParentCompletionHandoffInstructions(),
             },
           ],
           details: {
@@ -966,6 +970,73 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Fallback (shouldn't happen)
         const text = typeof result.content?.[0]?.text === "string" ? result.content[0].text : "";
         return new Text(theme.fg("dim", text), 0, 0);
+      },
+    });
+
+  // ── subagent_steer tool ──
+  if (shouldRegister("subagent_steer"))
+    pi.registerTool({
+      name: "subagent_steer",
+      label: "Steer Subagent",
+      description:
+        "Send a new instruction to an active subagent's existing Pi session. " +
+        "This does not resume the session or create another pane. " +
+        "Use the subagent id or exact display name returned when it was launched.",
+      promptSnippet:
+        "Send a new instruction to an active subagent's existing Pi session. " +
+        "This does not resume the session or create another pane. " +
+        "Use the subagent id or exact display name returned when it was launched.",
+      parameters: Type.Object({
+        target: Type.String({
+          description: "The active subagent id or exact display name",
+        }),
+        message: Type.String({
+          description: "Instruction to deliver to the active subagent",
+        }),
+      }),
+
+      async execute(_toolCallId, params) {
+        if (process.env.PI_SUBAGENT_NAME) {
+          return {
+            content: [{ type: "text", text: "Only the parent session can steer its running subagents." }],
+            details: { error: "subagent steering denied in child session" },
+            isError: true,
+          };
+        }
+        if (!isMuxAvailable()) return muxUnavailableResult("subagent steering");
+
+        try {
+          const result = steerRunningSubagent({
+            running: runningSubagents.values(),
+            target: params.target,
+            message: params.message,
+            send: sendCommand,
+            isComplete: (agent) => !!agent.doneFile && existsSync(agent.doneFile),
+          });
+          if ("error" in result) {
+            return {
+              content: [{ type: "text", text: result.error }],
+              details: { error: result.error },
+              isError: true,
+            };
+          }
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Steering message sent to "${result.agent.name}" in its existing pane.`,
+              },
+            ],
+            details: { id: result.agent.id, name: result.agent.name, status: "steered" },
+          };
+        } catch (err: any) {
+          return {
+            content: [{ type: "text", text: `Failed to steer subagent: ${err?.message ?? String(err)}` }],
+            details: { error: err?.message ?? String(err) },
+            isError: true,
+          };
+        }
       },
     });
 
@@ -1108,12 +1179,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "Resume a previous sub-agent session in a new multiplexer pane. " +
         "IMPORTANT: Returns IMMEDIATELY — the resumed session runs asynchronously in the background. " +
         "Results are delivered later via a steer message. Do NOT fabricate or assume results. " +
-        "Use when a sub-agent was cancelled or needs follow-up work.",
+        "Use only when a sub-agent was cancelled or needs follow-up work. Use subagent_steer for an active sub-agent.",
       promptSnippet:
         "Resume a previous sub-agent session in a new multiplexer pane. " +
         "IMPORTANT: Returns IMMEDIATELY — the resumed session runs asynchronously in the background. " +
         "Results are delivered later via a steer message. Do NOT fabricate or assume results. " +
-        "Use when a sub-agent was cancelled or needs follow-up work.",
+        "Use only when a sub-agent was cancelled or needs follow-up work. Use subagent_steer for an active sub-agent.",
       parameters: Type.Object({
         sessionPath: Type.String({ description: "Path to the session .jsonl file to resume" }),
         name: Type.Optional(

@@ -148,6 +148,21 @@ subagent({ name: "Designer", agent: "game-designer", cwd: "agents/game-designer"
 
 ---
 
+## Steering a running subagent
+
+Use `subagent_steer` to send an instruction to a subagent that is still running. It writes to that agent's existing Pi session. It does not resume the session or create another pane.
+
+```typescript
+subagent_steer({
+  target: "Worker", // an exact display name or the launch result's id
+  message: "Stop the current approach and inspect the failing test first.",
+});
+```
+
+Use it only for an active subagent. Once the completion steer arrives, use `subagent_resume` only when a cancelled or completed session needs more work.
+
+---
+
 ## The `/plan` Workflow
 
 The `/plan` command orchestrates a full planning-to-implementation pipeline.

@@ -19,6 +19,7 @@ import {
 } from "../pi-extension/subagents/session.ts";
 import {
   buildCompletionInstructions,
+  buildParentCompletionHandoffInstructions,
   buildResumeFollowupMessage,
 } from "../pi-extension/subagents/prompt.ts";
 
@@ -31,6 +32,7 @@ import {
 } from "../pi-extension/subagents/cmux.ts";
 import * as cmux from "../pi-extension/subagents/cmux.ts";
 import { normalizePaneId, paneSurface } from "../pi-extension/subagents/zellij.ts";
+import { steerRunningSubagent } from "../pi-extension/subagents/steering.ts";
 
 // --- Helpers ---
 
@@ -371,6 +373,18 @@ describe("prompt.ts", () => {
     });
   });
 
+  describe("buildParentCompletionHandoffInstructions", () => {
+    it("keeps the parent available instead of manually polling subagents", () => {
+      const prompt = buildParentCompletionHandoffInstructions();
+
+      assert.match(prompt, /automatically as a steer message/);
+      assert.match(prompt, /Do not block the parent session/);
+      assert.match(prompt, /Do not run `sleep`/);
+      assert.match(prompt, /logs, worktrees, panes, or session files/);
+      assert.match(prompt, /End the turn if no independent work remains/);
+    });
+  });
+
   describe("buildResumeFollowupMessage", () => {
     it("preserves the follow-up request and appends completion instructions", () => {
       const prompt = buildResumeFollowupMessage("Please make one more tweak.");
@@ -383,6 +397,49 @@ describe("prompt.ts", () => {
       const prompt = buildResumeFollowupMessage("Follow up");
       assert.match(prompt, /^Follow up\n\nWhen you complete this follow-up/);
     });
+  });
+});
+
+describe("steering.ts", () => {
+  it("sends a steer to the existing running pane without resuming a session", () => {
+    const sent: Array<{ surface: string; message: string }> = [];
+    const result = steerRunningSubagent({
+      running: [{ id: "worker-1", name: "Worker", surface: "pane:12" }],
+      target: "worker-1",
+      message: "Stop the current approach and inspect the failing test.",
+      send: (surface, message) => sent.push({ surface, message }),
+    });
+
+    assert.deepEqual(result, { agent: { id: "worker-1", name: "Worker", surface: "pane:12" } });
+    assert.deepEqual(sent, [
+      { surface: "pane:12", message: "Stop the current approach and inspect the failing test." },
+    ]);
+  });
+
+  it("rejects a completed subagent before its pane can return to a shell prompt", () => {
+    const result = steerRunningSubagent({
+      running: [{ id: "worker-1", name: "Worker", surface: "pane:12", doneFile: "/tmp/worker.done" }],
+      target: "worker-1",
+      message: "Use the latest plan.",
+      isComplete: (agent) => agent.doneFile === "/tmp/worker.done",
+      send: () => assert.fail("must not send a steer to a completed subagent"),
+    });
+
+    assert.deepEqual(result, { error: 'Subagent "Worker" has already completed.' });
+  });
+
+  it("rejects an ambiguous subagent name instead of steering the wrong pane", () => {
+    const result = steerRunningSubagent({
+      running: [
+        { id: "worker-1", name: "Worker", surface: "pane:12" },
+        { id: "worker-2", name: "Worker", surface: "pane:13" },
+      ],
+      target: "Worker",
+      message: "Use the latest plan.",
+      send: () => assert.fail("must not send a steer for an ambiguous target"),
+    });
+
+    assert.deepEqual(result, { error: 'Multiple running subagents are named "Worker". Use an id: worker-1, worker-2.' });
   });
 });
 

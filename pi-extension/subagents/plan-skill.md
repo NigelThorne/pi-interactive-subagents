@@ -53,6 +53,14 @@ Phase 5: Review
 
 ---
 
+## Completion handoff
+
+The extension watches each spawned subagent and returns its summary as a steer message. The parent session must remain available for user messages while it runs.
+
+Do not run `sleep` or manually poll logs, git worktrees, panes, or session files to learn whether a subagent finished. Do independent bounded work, or end the turn if none remains. When the steer message arrives, use its summary before starting dependent work.
+
+---
+
 ## Phase 1: Quick Investigation
 
 Before spawning the planner, orient yourself:
@@ -96,7 +104,7 @@ Context from investigation:
 });
 ```
 
-**The user works with the planner in the subagent.** The main session waits. When the user is done, they press Ctrl+D and the subagent.s summary is returned to the main session.
+**The user works with the planner in the subagent.** Keep the main session free for the user's messages. When the user is done, they press Ctrl+D and the subagent's summary returns to the main session as a steer message.
 
 ---
 
@@ -135,7 +143,7 @@ subagent({
   task: "Implement TODO-xxxx. Mark the todo as done. Plan: [plan path]\n\nScout context: [paste scout summary]",
 });
 
-// Check result, then next todo
+// Start this only after the previous worker's completion steer arrives
 subagent({
   name: "Worker",
   agent: "worker",

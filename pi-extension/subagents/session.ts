@@ -137,6 +137,11 @@ export function hasCompletedAssistantTurn(entries: SessionEntry[]): boolean {
   return last?.type === "message" && last.message?.role === "assistant" && last.message.stopReason === "stop";
 }
 
+/** Whether a completed assistant turn was written after a session offset. */
+export function hasCompletedAssistantTurnSince(sessionFile: string, afterEntryCount: number): boolean {
+  return hasCompletedAssistantTurn(getNewEntries(sessionFile, afterEntryCount));
+}
+
 /**
  * Read the explicit summary written by the subagent_done tool. This survives
  * Pi's trailing final answer (often just "Done.") after shutdown.

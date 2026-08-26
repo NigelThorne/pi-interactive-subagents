@@ -14,6 +14,7 @@ import {
   mergeNewEntries,
   readCompletionSummary,
   hasCompletedAssistantTurn,
+  hasCompletedAssistantTurnSince,
   precreateChildSessionFile,
   buildSubagentChildManifestData,
 } from "../pi-extension/subagents/session.ts";
@@ -246,6 +247,39 @@ describe("session.ts", () => {
       } as any;
       assert.equal(hasCompletedAssistantTurn([USER_MSG as any, completed]), true);
       assert.equal(hasCompletedAssistantTurn([USER_MSG as any, ASSISTANT_MSG as any]), false);
+    });
+
+    it("ignores a completed turn that predates a resumed session", () => {
+      const completed = {
+        ...ASSISTANT_MSG,
+        message: { ...ASSISTANT_MSG.message, stopReason: "stop" },
+      } as any;
+      const file = createSessionFile(dir, [SESSION_HEADER, USER_MSG, completed]);
+      const entryCountBeforeResume = getNewEntries(file, 0).length;
+
+      assert.equal(hasCompletedAssistantTurn(getNewEntries(file, 0)), true);
+      assert.equal(hasCompletedAssistantTurnSince(file, entryCountBeforeResume), false);
+      assert.equal(findLastAssistantMessage(getNewEntries(file, entryCountBeforeResume)), null);
+    });
+
+    it("detects the completed turn and summary written after resume", () => {
+      const historical = {
+        ...ASSISTANT_MSG,
+        message: { ...ASSISTANT_MSG.message, stopReason: "stop" },
+      } as any;
+      const resumed = {
+        ...ASSISTANT_MSG_2,
+        message: { ...ASSISTANT_MSG_2.message, stopReason: "stop" },
+      } as any;
+      const file = createSessionFile(dir, [SESSION_HEADER, USER_MSG, historical]);
+      const entryCountBeforeResume = getNewEntries(file, 0).length;
+      writeFileSync(file, JSON.stringify(resumed) + "\n", { flag: "a" });
+
+      assert.equal(hasCompletedAssistantTurnSince(file, entryCountBeforeResume), true);
+      assert.equal(
+        findLastAssistantMessage(getNewEntries(file, entryCountBeforeResume)),
+        "Updated plan with details.",
+      );
     });
   });
 

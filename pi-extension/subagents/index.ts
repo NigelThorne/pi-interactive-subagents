@@ -35,10 +35,11 @@ import {
 } from "./prompt.ts";
 import { steerRunningSubagent } from "./steering.ts";
 import {
+  getEntryCount,
   getNewEntries,
   findLastAssistantMessage,
   readCompletionSummary,
-  hasCompletedAssistantTurn,
+  hasCompletedAssistantTurnSince,
   precreateChildSessionFile,
   buildSubagentChildManifestData,
 } from "./session.ts";
@@ -251,6 +252,7 @@ interface RunningSubagent {
   doneFile: string;
   lineageData: ReturnType<typeof buildSubagentChildManifestData>;
   autoExit?: boolean;
+  entryCountBeforeResume?: number;
   entries?: number;
   bytes?: number;
   forkCleanupFile?: string;
@@ -655,10 +657,11 @@ async function watchSubagent(
 
         // `agent_end` can be skipped by some Pi runtimes. For an auto-exit
         // agent, a normally completed assistant turn is therefore a second,
-        // parent-owned termination signal.
+        // parent-owned termination signal. Resumed sessions must ignore their
+        // completed history and wait for a turn written after the resume point.
         if (running.autoExit && existsSync(sessionFile)) {
           try {
-            if (hasCompletedAssistantTurn(getNewEntries(sessionFile, 0))) {
+            if (hasCompletedAssistantTurnSince(sessionFile, running.entryCountBeforeResume ?? 0)) {
               closeSurface(surface);
               resolve(0);
               return;
@@ -685,10 +688,10 @@ async function watchSubagent(
     // Extract summary from the known session file
     let summary: string;
     if (existsSync(sessionFile)) {
-      const allEntries = getNewEntries(sessionFile, 0);
+      const newEntries = getNewEntries(sessionFile, running.entryCountBeforeResume ?? 0);
       summary =
         readCompletionSummary(doneFile) ??
-        findLastAssistantMessage(allEntries) ??
+        findLastAssistantMessage(newEntries) ??
         (exitCode !== 0
           ? `Sub-agent exited with code ${exitCode}`
           : "Sub-agent exited without output");
@@ -1243,7 +1246,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
 
         // Record entry count before resuming so we can extract new messages
-        const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
+        const entryCountBeforeResume = getEntryCount(params.sessionPath);
 
         const doneFile = join(
           dirname(params.sessionPath),
@@ -1292,6 +1295,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           sessionFile: params.sessionPath,
           doneFile,
           autoExit: true,
+          entryCountBeforeResume,
         };
         runningSubagents.set(id, running);
         startWidgetRefresh();

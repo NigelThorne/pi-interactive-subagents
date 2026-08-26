@@ -242,12 +242,15 @@ interface SubagentResult {
  * State for a launched (but not yet completed) subagent.
  */
 interface RunningSubagent {
+  /** Stable parent-side launch ID. */
   id: string;
   name: string;
   task: string;
   agent?: string;
   surface: string;
   startTime: number;
+  /** Pi session ID in the child session header. */
+  sessionId?: string;
   sessionFile: string;
   doneFile: string;
   lineageData: ReturnType<typeof buildSubagentChildManifestData>;
@@ -597,6 +600,7 @@ async function launchSubagent(
     agent: params.agent,
     surface,
     startTime,
+    sessionId: uuid,
     sessionFile: subagentSessionFile,
     doneFile: subagentDoneFile,
     lineageData: buildSubagentChildManifestData({
@@ -923,6 +927,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             name: running.name,
             task: params.task,
             agent: params.agent,
+            sessionId: running.sessionId,
             sessionFile: running.sessionFile,
             status: "started",
           },
@@ -984,14 +989,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       description:
         "Send a new instruction to an active subagent's existing Pi session. " +
         "This does not resume the session or create another pane. " +
-        "Use the subagent id or exact display name returned when it was launched.",
+        "Use the stable launch id, Pi session id, session path, or exact launch display name.",
       promptSnippet:
         "Send a new instruction to an active subagent's existing Pi session. " +
         "This does not resume the session or create another pane. " +
-        "Use the subagent id or exact display name returned when it was launched.",
+        "Use the stable launch id, Pi session id, session path, or exact launch display name.",
       parameters: Type.Object({
         target: Type.String({
-          description: "The active subagent id or exact display name",
+          description: "The active subagent's launch id, Pi session id, session path, or exact launch display name",
         }),
         message: Type.String({
           description: "Instruction to deliver to the active subagent",
@@ -1031,7 +1036,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                 text: `Steering message sent to "${result.agent.name}" in its existing pane.`,
               },
             ],
-            details: { id: result.agent.id, name: result.agent.name, status: "steered" },
+            details: {
+              id: result.agent.id,
+              name: result.agent.name,
+              sessionId: result.agent.sessionId,
+              sessionFile: result.agent.sessionFile,
+              status: "steered",
+            },
           };
         } catch (err: any) {
           return {

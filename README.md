@@ -154,10 +154,13 @@ Use `subagent_steer` to send an instruction to a subagent that is still running.
 
 ```typescript
 subagent_steer({
-  target: "Worker", // an exact display name or the launch result's id
+  // Prefer a stable identifier from the launch result. Pane titles may change.
+  target: launchResult.details.sessionId,
   message: "Stop the current approach and inspect the failing test first.",
 });
 ```
+
+The target may be the stable launch `id`, Pi `sessionId`, `sessionFile` path, or exact display name supplied at launch. A title set with `set_tab_title` is not an identifier.
 
 Use it only for an active subagent. Once the completion steer arrives, use `subagent_resume` only when a cancelled or completed session needs more work.
 

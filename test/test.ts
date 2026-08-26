@@ -450,6 +450,21 @@ describe("steering.ts", () => {
     ]);
   });
 
+  it("finds a running subagent by its Pi session ID after its display title changes", () => {
+    const sent: Array<{ surface: string; message: string }> = [];
+    const result = steerRunningSubagent({
+      running: [{ id: "worker-1", name: "Worker", sessionId: "child-session-123", surface: "pane:12" }],
+      target: "child-session-123",
+      message: "Continue with the approved plan.",
+      send: (surface, message) => sent.push({ surface, message }),
+    });
+
+    assert.deepEqual(result, {
+      agent: { id: "worker-1", name: "Worker", sessionId: "child-session-123", surface: "pane:12" },
+    });
+    assert.deepEqual(sent, [{ surface: "pane:12", message: "Continue with the approved plan." }]);
+  });
+
   it("rejects a completed subagent before its pane can return to a shell prompt", () => {
     const result = steerRunningSubagent({
       running: [{ id: "worker-1", name: "Worker", surface: "pane:12", doneFile: "/tmp/worker.done" }],

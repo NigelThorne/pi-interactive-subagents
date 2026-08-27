@@ -51,11 +51,13 @@ Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij` to force a specific backend.
 
 ### Extensions
 
-**Subagents** — 4 tools + 3 commands:
+**Subagents** — 6 tools + 3 commands:
 
 | Tool              | Description                                                                     |
 | ----------------- | ------------------------------------------------------------------------------- |
-| `subagent`        | Spawn a sub-agent in a dedicated multiplexer pane (async — returns immediately) |
+| `subagent`        | Spawn a sub-agent in a dedicated multiplexer pane (async, returns immediately) |
+| `subagent_status` | Verify tracked child pane, Pi process, and completion-file state                |
+| `subagent_steer`  | Send a follow-up instruction to a running sub-agent                             |
 | `subagents_list`  | List available agent definitions                                                |
 | `set_tab_title`   | Update tab/window title to show progress (Zellij only)                          |
 | `subagent_resume` | Resume a previous sub-agent session (async); follow-up messages auto-append finish instructions |
@@ -91,8 +93,8 @@ Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global**
 
 ```
 1. Agent calls subagent()         → returns immediately ("started")
-2. Sub-agent runs in mux pane     → widget shows live progress
-3. User keeps chatting             → main session fully interactive
+2. Sub-agent starts in a mux pane → widget tracks it
+3. subagent_status verifies pane, Pi process, and done-file state
 4. Sub-agent finishes              → result steered back as interrupt
 5. Main agent processes result     → continues with new context
 ```

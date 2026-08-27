@@ -11,6 +11,7 @@ export function buildCompletionInstructions(_options?: { autoExit?: boolean }): 
 export function buildParentCompletionHandoffInstructions(): string {
   return [
     "A subagent returns its completion summary automatically as a steer message.",
+    "Call `subagent_status` before claiming that the child Pi process is live.",
     "Do not block the parent session. Do not run `sleep` or manually poll logs, worktrees, panes, or session files for completion.",
     "Do unrelated bounded work if any remains. End the turn if no independent work remains, so the parent stays available for user messages.",
   ].join(" ");

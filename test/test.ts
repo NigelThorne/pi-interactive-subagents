@@ -34,6 +34,7 @@ import {
 import * as cmux from "../pi-extension/subagents/cmux.ts";
 import { normalizePaneId, paneSurface } from "../pi-extension/subagents/zellij.ts";
 import { steerRunningSubagent } from "../pi-extension/subagents/steering.ts";
+import { inspectSubagentStatus, parseProcessRows } from "../pi-extension/subagents/status.ts";
 
 // --- Helpers ---
 
@@ -412,6 +413,7 @@ describe("prompt.ts", () => {
       const prompt = buildParentCompletionHandoffInstructions();
 
       assert.match(prompt, /automatically as a steer message/);
+      assert.match(prompt, /Call `subagent_status` before claiming that the child Pi process is live/);
       assert.match(prompt, /Do not block the parent session/);
       assert.match(prompt, /Do not run `sleep`/);
       assert.match(prompt, /logs, worktrees, panes, or session files/);
@@ -489,6 +491,68 @@ describe("steering.ts", () => {
     });
 
     assert.deepEqual(result, { error: 'Multiple running subagents are named "Worker". Use an id: worker-1, worker-2.' });
+  });
+});
+
+describe("status.ts", () => {
+  const agent = {
+    id: "worker-1",
+    name: "Worker",
+    surface: "pane:12",
+    startTime: 1_000,
+    sessionFile: "/tmp/worker-session.jsonl",
+    doneFile: "/tmp/worker.done",
+  };
+
+  it("reports running only when the child Pi process is present", () => {
+    const processes = parseProcessRows(
+      [
+        "  122  100 ttys001 Ss+ 00:10 /bin/zsh -lc pi --session /tmp/worker-session.jsonl",
+        "  123  122 ttys001 S+ 00:10 pi",
+      ].join("\n"),
+      agent.sessionFile,
+    );
+
+    const result = inspectSubagentStatus(agent, {
+      doneFileExists: false,
+      paneState: "present",
+      processes,
+      now: 11_000,
+    });
+
+    assert.equal(result.lifecycle, "running");
+    assert.equal(result.paneState, "present");
+    assert.deepEqual(result.processes.map((process) => process.pid), [123]);
+    assert.equal(result.elapsedSeconds, 10);
+  });
+
+  it("does not call a pane with no child Pi process running", () => {
+    const result = inspectSubagentStatus(agent, {
+      doneFileExists: false,
+      paneState: "present",
+      processes: [],
+      now: 11_000,
+    });
+
+    assert.equal(result.lifecycle, "unconfirmed");
+    assert.equal(result.paneState, "present");
+  });
+
+  it("reports completed when the done file exists even if a stale process row remains", () => {
+    const result = inspectSubagentStatus(agent, {
+      doneFileExists: true,
+      paneState: "present",
+      processes: parseProcessRows(
+        [
+          "  122  100 ttys001 Ss+ 00:10 /bin/zsh -lc pi --session /tmp/worker-session.jsonl",
+          "  123  122 ttys001 S+ 00:10 pi",
+        ].join("\n"),
+        agent.sessionFile,
+      ),
+      now: 11_000,
+    });
+
+    assert.equal(result.lifecycle, "completed");
   });
 });
 

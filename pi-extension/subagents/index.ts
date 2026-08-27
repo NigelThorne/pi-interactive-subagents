@@ -21,6 +21,7 @@ import {
   createSurface,
   sendCommand,
   closeSurface,
+  readScreen,
   shellEscape,
   captureExitStatusCommand,
   prepareForSubagents,
@@ -34,6 +35,11 @@ import {
   buildResumeFollowupMessage,
 } from "./prompt.ts";
 import { steerRunningSubagent } from "./steering.ts";
+import {
+  inspectSubagentStatus,
+  listChildPiProcesses,
+  type PaneState,
+} from "./status.ts";
 import {
   getEntryCount,
   getNewEntries,
@@ -283,6 +289,16 @@ function formatElapsedMMSS(startTime: number): string {
 function formatSubagentLabel(name: string, agent?: string): string {
   if (!agent || agent === name) return name;
   return `${name} [${agent}]`;
+}
+
+function getPaneState(surface: string): PaneState {
+  if (!isMuxAvailable()) return "unknown";
+  try {
+    readScreen(surface, 1);
+    return "present";
+  } catch {
+    return "missing";
+  }
 }
 
 function buildPropagatedEnvPrefixParts(): string[] {
@@ -917,7 +933,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             {
               type: "text",
               text:
-                `Sub-agent "${running.name}" launched and is now running in the background. ` +
+                `Sub-agent "${running.name}" launched and is being tracked. ` +
+                "Use subagent_status before claiming its Pi process is live. " +
                 "Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. " +
                 buildParentCompletionHandoffInstructions(),
             },
@@ -978,6 +995,62 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Fallback (shouldn't happen)
         const text = typeof result.content?.[0]?.text === "string" ? result.content[0].text : "";
         return new Text(theme.fg("dim", text), 0, 0);
+      },
+    });
+
+  // ── subagent_status tool ──
+  if (shouldRegister("subagent_status"))
+    pi.registerTool({
+      name: "subagent_status",
+      label: "Subagent Status",
+      description:
+        "Report the parent session's tracked subagents with verified pane, child-Pi-process, and completion-file state. " +
+        "Call this before claiming a subagent is live. A pane alone is not proof that its Pi process is running.",
+      promptSnippet:
+        "Before claiming a subagent is live, call subagent_status. Treat only lifecycle=running as proof that the child Pi process is live. " +
+        "Do not infer subagent liveness from a launch result, a visible pane, or detached work processes.",
+      parameters: Type.Object({}),
+      async execute() {
+        const statuses = [...runningSubagents.values()].map((agent) => {
+          let processes: ReturnType<typeof listChildPiProcesses> = [];
+          try {
+            processes = listChildPiProcesses(agent.sessionFile);
+          } catch {
+            // A failed process probe is represented by an unknown pane/process state below.
+          }
+          return inspectSubagentStatus(agent, {
+            doneFileExists: existsSync(agent.doneFile),
+            paneState: getPaneState(agent.surface),
+            processes,
+            now: Date.now(),
+          });
+        });
+        const summary =
+          statuses.length === 0
+            ? "No subagents are tracked by this parent session."
+            : statuses
+                .map((status) => {
+                  const processes = status.processes
+                    .map((process) => `pid=${process.pid} tty=${process.tty} elapsed=${process.elapsed}`)
+                    .join(", ");
+                  return [
+                    `${status.name}: lifecycle=${status.lifecycle}`,
+                    `pane=${status.paneState}`,
+                    `doneFile=${status.doneFileExists ? "present" : "absent"}`,
+                    `childPi=${processes || "not found"}`,
+                  ].join("; ");
+                })
+                .join("\n");
+
+        return {
+          content: [{ type: "text", text: summary }],
+          details: {
+            subagents: statuses.map((status) => ({
+              ...status,
+              processes: status.processes.map(({ command: _command, ...process }) => process),
+            })),
+          },
+        };
       },
     });
 

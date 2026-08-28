@@ -164,7 +164,7 @@ subagent_steer({
 
 The target may be the stable launch `id`, Pi `sessionId`, `sessionFile` path, or exact display name supplied at launch. A title set with `set_tab_title` is not an identifier.
 
-Each `subagent_status` entry prints the exact display name and a `steerTarget`. Prefer `steerTarget`: it is the stable launch ID and works without reproducing the display name exactly.
+Each running `subagent_status` entry prints the exact display name and a `steerTarget`. Prefer `steerTarget`: it is the stable launch ID and works without reproducing the display name exactly.
 
 Use it only for an active subagent. Once the completion steer arrives, use `subagent_resume` only when a cancelled or completed session needs more work.
 

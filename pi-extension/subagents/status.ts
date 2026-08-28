@@ -106,7 +106,7 @@ export function formatSubagentStatus(status: SubagentStatus): string {
     .join(", ");
   return [
     `name=${JSON.stringify(status.name)}`,
-    `steerTarget=${JSON.stringify(status.id)} (use as subagent_steer.target)`,
+    ...(status.lifecycle === "running" ? [`steerTarget=${JSON.stringify(status.id)} (use as subagent_steer.target)`] : []),
     `lifecycle=${status.lifecycle}`,
     `pane=${status.paneState}`,
     `doneFile=${status.doneFileExists ? "present" : "absent"}`,

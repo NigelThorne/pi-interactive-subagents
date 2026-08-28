@@ -508,7 +508,7 @@ describe("status.ts", () => {
     doneFile: "/tmp/worker.done",
   };
 
-  it("formats an exact display name and preferred stable steering target", () => {
+  it("omits the steering target until the child Pi process is running", () => {
     const status = inspectSubagentStatus(
       { ...agent, id: "launch-7f3a", name: "Dashboard CLI help [worker]" },
       {
@@ -520,7 +520,7 @@ describe("status.ts", () => {
     );
     assert.equal(
       formatSubagentStatus(status),
-      'name="Dashboard CLI help [worker]"; steerTarget="launch-7f3a" (use as subagent_steer.target); lifecycle=unconfirmed; pane=present; doneFile=absent; childPi=not found',
+      'name="Dashboard CLI help [worker]"; lifecycle=unconfirmed; pane=present; doneFile=absent; childPi=not found',
     );
   });
 

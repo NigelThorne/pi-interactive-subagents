@@ -34,7 +34,11 @@ import {
 import * as cmux from "../pi-extension/subagents/cmux.ts";
 import { normalizePaneId, paneSurface } from "../pi-extension/subagents/zellij.ts";
 import { steerRunningSubagent } from "../pi-extension/subagents/steering.ts";
-import { inspectSubagentStatus, parseProcessRows } from "../pi-extension/subagents/status.ts";
+import {
+  formatSubagentStatus,
+  inspectSubagentStatus,
+  parseProcessRows,
+} from "../pi-extension/subagents/status.ts";
 
 // --- Helpers ---
 
@@ -503,6 +507,22 @@ describe("status.ts", () => {
     sessionFile: "/tmp/worker-session.jsonl",
     doneFile: "/tmp/worker.done",
   };
+
+  it("formats an exact display name and preferred stable steering target", () => {
+    const status = inspectSubagentStatus(
+      { ...agent, id: "launch-7f3a", name: "Dashboard CLI help [worker]" },
+      {
+        doneFileExists: false,
+        paneState: "present",
+        processes: [],
+        now: 11_000,
+      },
+    );
+    assert.equal(
+      formatSubagentStatus(status),
+      'name="Dashboard CLI help [worker]"; steerTarget="launch-7f3a" (use as subagent_steer.target); lifecycle=unconfirmed; pane=present; doneFile=absent; childPi=not found',
+    );
+  });
 
   it("reports running only when the child Pi process is present", () => {
     const processes = parseProcessRows(

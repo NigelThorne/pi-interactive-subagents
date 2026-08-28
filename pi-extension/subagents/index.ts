@@ -36,6 +36,7 @@ import {
 } from "./prompt.ts";
 import { steerRunningSubagent } from "./steering.ts";
 import {
+  formatSubagentStatus,
   inspectSubagentStatus,
   listChildPiProcesses,
   type PaneState,
@@ -1005,9 +1006,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       label: "Subagent Status",
       description:
         "Report the parent session's tracked subagents with verified pane, child-Pi-process, and completion-file state. " +
+        "Each entry includes the exact display name and a preferred stable steerTarget ID. " +
         "Call this before claiming a subagent is live. A pane alone is not proof that its Pi process is running.",
       promptSnippet:
         "Before claiming a subagent is live, call subagent_status. Treat only lifecycle=running as proof that the child Pi process is live. " +
+        "To steer a listed agent, use its steerTarget as subagent_steer.target. " +
         "Do not infer subagent liveness from a launch result, a visible pane, or detached work processes.",
       parameters: Type.Object({}),
       async execute() {
@@ -1029,17 +1032,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           statuses.length === 0
             ? "No subagents are tracked by this parent session."
             : statuses
-                .map((status) => {
-                  const processes = status.processes
-                    .map((process) => `pid=${process.pid} tty=${process.tty} elapsed=${process.elapsed}`)
-                    .join(", ");
-                  return [
-                    `${status.name}: lifecycle=${status.lifecycle}`,
-                    `pane=${status.paneState}`,
-                    `doneFile=${status.doneFileExists ? "present" : "absent"}`,
-                    `childPi=${processes || "not found"}`,
-                  ].join("; ");
-                })
+                .map(formatSubagentStatus)
                 .join("\n");
 
         return {

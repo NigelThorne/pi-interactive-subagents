@@ -100,6 +100,20 @@ export function listChildPiProcesses(sessionFile: string): ChildPiProcess[] {
   return parseProcessRows(output, sessionFile);
 }
 
+export function formatSubagentStatus(status: SubagentStatus): string {
+  const processes = status.processes
+    .map((process) => `pid=${process.pid} tty=${process.tty} elapsed=${process.elapsed}`)
+    .join(", ");
+  return [
+    `name=${JSON.stringify(status.name)}`,
+    `steerTarget=${JSON.stringify(status.id)} (use as subagent_steer.target)`,
+    `lifecycle=${status.lifecycle}`,
+    `pane=${status.paneState}`,
+    `doneFile=${status.doneFileExists ? "present" : "absent"}`,
+    `childPi=${processes || "not found"}`,
+  ].join("; ");
+}
+
 export function inspectSubagentStatus(agent: StatusAgent, probe: StatusProbe): SubagentStatus {
   const lifecycle: SubagentLifecycle = probe.doneFileExists
     ? "completed"

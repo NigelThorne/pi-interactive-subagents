@@ -69,28 +69,55 @@ function isPiProcess(process: ProcessRow): boolean {
   return executable === "pi" || executable.endsWith("/pi");
 }
 
-export function parseProcessRows(output: string, sessionFile: string): ChildPiProcess[] {
-  const rows = output
+function parseRows(output: string): ProcessRow[] {
+  return output
     .split("\n")
     .map(parseProcessRow)
     .filter((process): process is ProcessRow => process !== null);
+}
+
+function ancestryMatches(
+  process: ProcessRow,
+  byPid: Map<number, ProcessRow>,
+  predicate: (ancestor: ProcessRow) => boolean,
+): boolean {
+  const visited = new Set<number>();
+  let current: ProcessRow | undefined = process;
+  while (current && !visited.has(current.pid)) {
+    if (predicate(current)) return true;
+    visited.add(current.pid);
+    current = byPid.get(current.ppid);
+  }
+  return false;
+}
+
+export function parseProcessRows(output: string, sessionFile: string): ChildPiProcess[] {
+  const rows = parseRows(output);
   const byPid = new Map(rows.map((process) => [process.pid, process]));
-  const launchShellPids = new Set(
-    rows.filter((process) => process.command.includes(sessionFile)).map((process) => process.pid),
+  return rows.filter(
+    (process) =>
+      isPiProcess(process) &&
+      ancestryMatches(process, byPid, (ancestor) => ancestor.command.includes(sessionFile)),
   );
+}
 
-  const descendsFromLaunchShell = (process: ProcessRow): boolean => {
-    const visited = new Set<number>();
-    let current: ProcessRow | undefined = process;
-    while (current && !visited.has(current.pid)) {
-      if (launchShellPids.has(current.pid)) return true;
-      visited.add(current.pid);
-      current = byPid.get(current.ppid);
-    }
-    return false;
-  };
+export function parseProcessRowsForPane(
+  output: string,
+  sessionFile: string,
+  panePID: number,
+  paneTTY: string,
+): ChildPiProcess[] {
+  const rows = parseRows(output);
+  const byPid = new Map(rows.map((process) => [process.pid, process]));
+  const normalizedTTY = paneTTY.replace(/^\/dev\//, "");
 
-  return rows.filter((process) => isPiProcess(process) && descendsFromLaunchShell(process));
+  return rows.filter(
+    (process) =>
+      isPiProcess(process) &&
+      process.tty.replace(/^\/dev\//, "") === normalizedTTY &&
+      ancestryMatches(process, byPid, (ancestor) => ancestor.pid === panePID) &&
+      ancestryMatches(process, byPid, (ancestor) => ancestor.command.includes(sessionFile)),
+  );
 }
 
 export function listChildPiProcesses(sessionFile: string): ChildPiProcess[] {

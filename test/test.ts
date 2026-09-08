@@ -471,6 +471,18 @@ describe("steering.ts", () => {
     assert.deepEqual(sent, [{ surface: "pane:12", message: "Continue with the approved plan." }]);
   });
 
+  it("rejects a pane that does not have a verified running child Pi", () => {
+    const result = steerRunningSubagent({
+      running: [{ id: "worker-1", name: "Worker", surface: "%12" }],
+      target: "worker-1",
+      message: "Use the latest plan.",
+      isRunning: () => false,
+      send: () => assert.fail("must not send a steer to an unverified pane"),
+    });
+
+    assert.deepEqual(result, { error: 'Subagent "Worker" does not have a verified running Pi process.' });
+  });
+
   it("rejects a completed subagent before its pane can return to a shell prompt", () => {
     const result = steerRunningSubagent({
       running: [{ id: "worker-1", name: "Worker", surface: "pane:12", doneFile: "/tmp/worker.done" }],
@@ -683,14 +695,14 @@ esac
   });
 
   describe("isTabTitleSupported", () => {
-    it("only enables the title tool in a Zellij runtime", () => {
+    it("enables the title tool in stable Zellij and tmux runtimes", () => {
       const isTabTitleSupported = (cmux as typeof cmux & {
         isTabTitleSupported?: (backend: "cmux" | "tmux" | "zellij" | null) => boolean;
       }).isTabTitleSupported;
 
       assert.equal(isTabTitleSupported?.("zellij"), true);
       assert.equal(isTabTitleSupported?.("cmux"), false);
-      assert.equal(isTabTitleSupported?.("tmux"), false);
+      assert.equal(isTabTitleSupported?.("tmux"), true);
       assert.equal(isTabTitleSupported?.(null), false);
     });
   });

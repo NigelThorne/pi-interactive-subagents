@@ -21,7 +21,8 @@ import {
   createSurface,
   sendCommand,
   closeSurface,
-  readScreen,
+  getSurfaceState,
+  probeSurfaceSubagent,
   shellEscape,
   captureExitStatusCommand,
   prepareForSubagents,
@@ -292,13 +293,16 @@ function formatSubagentLabel(name: string, agent?: string): string {
   return `${name} [${agent}]`;
 }
 
-function getPaneState(surface: string): PaneState {
-  if (!isMuxAvailable()) return "unknown";
+function hasVerifiedRunningPi(agent: { surface: string; sessionFile?: string }): boolean {
+  if (!agent.sessionFile) return false;
   try {
-    readScreen(surface, 1);
-    return "present";
+    const muxProbe = probeSurfaceSubagent(agent.surface, agent.sessionFile);
+    if (muxProbe) {
+      return muxProbe.paneState === "present" && muxProbe.processes.length > 0;
+    }
+    return getSurfaceState(agent.surface) === "present" && listChildPiProcesses(agent.sessionFile).length > 0;
   } catch {
-    return "missing";
+    return false;
   }
 }
 
@@ -545,9 +549,8 @@ async function launchSubagent(
   }
 
   // Build env prefix: denied tools + subagent identity.
-  // Zellij-created panes inherit the zellij server environment, not necessarily
-  // the parent pi process environment. Propagate extension-critical env vars that
-  // may have been exported after the zellij server started.
+  // Multiplexer-created panes can inherit server environment captured before
+  // the parent Pi started. Propagate extension-critical values explicitly.
   const envParts: string[] = buildPropagatedEnvPrefixParts();
   if (denySet.size > 0) {
     envParts.push(`PI_DENY_TOOLS=${shellEscape([...denySet].join(","))}`);
@@ -592,21 +595,20 @@ async function launchSubagent(
   const piCommand = cdPrefix + envPrefix + parts.join(" ");
   const command = `${piCommand}; ${captureExitStatusCommand(subagentDoneFile)}`;
 
-  // Use pre-created surface (parallel mode) or create a new one.
-  // For zellij 0.44.1+, launch the command directly with `new-pane --close-on-exit -- <command>`
-  // so the pane can auto-close cleanly when the subagent exits.
+  // Zellij and tmux launch the command as part of pane creation. This avoids a
+  // timing race where typed commands can land in the wrong shell or pane.
   const surfacePreCreated = !!options?.surface;
   const muxBackend = getMuxBackend();
-  if (muxBackend === "zellij" && !process.env.PI_SUBAGENT_NAME) {
+  if ((muxBackend === "zellij" || muxBackend === "tmux") && !process.env.PI_SUBAGENT_NAME) {
     prepareForSubagents(`π ${displayName}`);
   }
+  const launchesDirectly = muxBackend === "zellij" || muxBackend === "tmux";
   const surface =
     options?.surface ??
-    (muxBackend === "zellij" ? createSurface(displayName, command) : createSurface(displayName));
-  if (!surfacePreCreated && muxBackend !== "zellij") {
-    await new Promise<void>((resolve) => setTimeout(resolve, 500));
-  }
-  if (surfacePreCreated || muxBackend !== "zellij") {
+    (launchesDirectly
+      ? createSurface(displayName, command, effectiveCwd)
+      : createSurface(displayName, undefined, effectiveCwd));
+  if (surfacePreCreated || !launchesDirectly) {
     sendCommand(surface, command);
   }
 
@@ -1016,14 +1018,22 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       async execute() {
         const statuses = [...runningSubagents.values()].map((agent) => {
           let processes: ReturnType<typeof listChildPiProcesses> = [];
+          let paneState: PaneState = "unknown";
           try {
-            processes = listChildPiProcesses(agent.sessionFile);
+            const muxProbe = probeSurfaceSubagent(agent.surface, agent.sessionFile);
+            if (muxProbe) {
+              processes = muxProbe.processes;
+              paneState = muxProbe.paneState;
+            } else {
+              processes = listChildPiProcesses(agent.sessionFile);
+              paneState = getSurfaceState(agent.surface);
+            }
           } catch {
-            // A failed process probe is represented by an unknown pane/process state below.
+            // Probe failures remain unknown. They never prove that the Pi process is dead.
           }
           return inspectSubagentStatus(agent, {
             doneFileExists: existsSync(agent.doneFile),
-            paneState: getPaneState(agent.surface),
+            paneState,
             processes,
             now: Date.now(),
           });
@@ -1086,6 +1096,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             message: params.message,
             send: sendCommand,
             isComplete: (agent) => !!agent.doneFile && existsSync(agent.doneFile),
+            isRunning: hasVerifiedRunningPi,
           });
           if ("error" in result) {
             return {
@@ -1304,7 +1315,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         return new Text(theme.fg("dim", text), 0, 0);
       },
 
-      async execute(_toolCallId, params, _signal, _onUpdate) {
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         const name = params.name ?? "Resume";
         const displayName = formatSubagentLabel(name);
         const startTime = Date.now();
@@ -1353,13 +1364,19 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const envPrefix = resumeEnvParts.join(" ");
         const commandPrefix = envPrefix ? `${envPrefix} ` : "";
         const command = `${commandPrefix}${parts.join(" ")}${cleanupMsgFile ? `; rm -f ${shellEscape(cleanupMsgFile)}` : ""}; ${captureExitStatusCommand(doneFile)}`;
+        let resumeCwd = ctx.cwd;
+        try {
+          const header = JSON.parse(
+            readFileSync(params.sessionPath, "utf8").split("\n").find((line) => line.trim()) ?? "{}",
+          );
+          if (typeof header.cwd === "string" && header.cwd.startsWith("/")) resumeCwd = header.cwd;
+        } catch {}
         const muxBackend = getMuxBackend();
-        const surface =
-          muxBackend === "zellij" ? createSurface(displayName, command) : createSurface(displayName);
-        if (muxBackend !== "zellij") {
-          await new Promise<void>((resolve) => setTimeout(resolve, 500));
-          sendCommand(surface, command);
-        }
+        const launchesDirectly = muxBackend === "zellij" || muxBackend === "tmux";
+        const surface = launchesDirectly
+          ? createSurface(displayName, command, resumeCwd)
+          : createSurface(displayName, undefined, resumeCwd);
+        if (!launchesDirectly) sendCommand(surface, command);
 
         // Register as a running subagent for widget tracking
         const id = Math.random().toString(16).slice(2, 10);

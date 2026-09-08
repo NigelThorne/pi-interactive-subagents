@@ -22,6 +22,7 @@ export function steerRunningSubagent(options: {
   message: string;
   send: (surface: string, message: string) => void;
   isComplete?: (agent: SteerableSubagent) => boolean;
+  isRunning?: (agent: SteerableSubagent) => boolean;
 }): SubagentSteerResult {
   const target = options.target.trim();
   const message = options.message.trim();
@@ -46,6 +47,9 @@ export function steerRunningSubagent(options: {
   const agent = matches[0];
   if (options.isComplete?.(agent)) {
     return { error: `Subagent "${agent.name}" has already completed.` };
+  }
+  if (options.isRunning && !options.isRunning(agent)) {
+    return { error: `Subagent "${agent.name}" does not have a verified running Pi process.` };
   }
 
   options.send(agent.surface, message);

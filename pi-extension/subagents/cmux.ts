@@ -1,6 +1,25 @@
 import { execSync, execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { basename } from "node:path";
+import { accessSync, constants } from "node:fs";
+import {
+  captureTmuxPane,
+  captureTmuxPaneAsync,
+  closeTmuxPane,
+  createTmuxPane,
+  currentTmuxPaneRoute,
+  defaultTmuxConnection,
+  getTmuxPaneState,
+  probeTmuxSubagent,
+  queryTmuxPaneRoute,
+  rememberedTmuxPaneRoute,
+  renameTmuxPane,
+  renameTmuxSession,
+  renameTmuxWindow,
+  sendTmuxCommand,
+  type TmuxPaneRoute,
+} from "./tmux.ts";
+import type { ChildPiProcess, PaneState } from "./status.ts";
 import {
   closePane as zellijClosePane,
   createPaneInSameTab as zellijCreatePaneInSameTab,
@@ -46,7 +65,15 @@ function isCmuxRuntimeAvailable(): boolean {
 }
 
 function isTmuxRuntimeAvailable(): boolean {
-  return !!process.env.TMUX && hasCommand("tmux");
+  if (!process.env.TMUX || !process.env.TMUX_PANE) return false;
+  const configured = process.env.PI_SUBAGENT_TMUX_EXECUTABLE?.trim();
+  if (!configured) return hasCommand("tmux");
+  try {
+    accessSync(configured, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isZellijRuntimeAvailable(): boolean {
@@ -71,8 +98,10 @@ export function getMuxBackend(): MuxBackend | null {
   if (pref === "tmux") return isTmuxRuntimeAvailable() ? "tmux" : null;
   if (pref === "zellij") return isZellijRuntimeAvailable() ? "zellij" : null;
 
-  if (isCmuxRuntimeAvailable()) return "cmux";
+  // A real tmux pane is the strongest runtime signal. Do not let inherited
+  // cmux variables route pane actions away from the process's actual parent.
   if (isTmuxRuntimeAvailable()) return "tmux";
+  if (isCmuxRuntimeAvailable()) return "cmux";
   if (isZellijRuntimeAvailable()) return "zellij";
   return null;
 }
@@ -82,11 +111,10 @@ export function isMuxAvailable(): boolean {
 }
 
 /**
- * `set_tab_title` relies on Zellij's stable pane/tab targeting. Do not expose
- * it in other terminals, where a failed rename can terminate the Pi process.
+ * `set_tab_title` is exposed only where stable pane/window targeting is available.
  */
 export function isTabTitleSupported(backend: MuxBackend | null = getMuxBackend()): boolean {
-  return backend === "zellij";
+  return backend === "tmux" || backend === "zellij";
 }
 
 export function muxSetupHint(): string {
@@ -109,6 +137,30 @@ function requireMuxBackend(): MuxBackend {
     throw new Error(`No supported terminal multiplexer found. ${muxSetupHint()}`);
   }
   return backend;
+}
+
+function requireTmuxRoute(surface: string): TmuxPaneRoute {
+  return rememberedTmuxPaneRoute(surface) ?? queryTmuxPaneRoute(defaultTmuxConnection(), surface);
+}
+
+export function getSurfaceState(surface: string): PaneState {
+  const backend = getMuxBackend();
+  if (!backend) return "unknown";
+  if (backend === "tmux") return getTmuxPaneState(requireTmuxRoute(surface));
+  try {
+    readScreen(surface, 1);
+    return "present";
+  } catch {
+    return "missing";
+  }
+}
+
+export function probeSurfaceSubagent(
+  surface: string,
+  sessionFile: string,
+): { paneState: PaneState; processes: ChildPiProcess[] } | null {
+  if (getMuxBackend() !== "tmux") return null;
+  return probeTmuxSubagent(requireTmuxRoute(surface), sessionFile);
 }
 
 /**
@@ -142,8 +194,8 @@ export function shellEscape(s: string): string {
  * Create a new terminal pane as a right split and set its title.
  * Returns an identifier (`surface:42` in cmux, `%12` in tmux, `pane:7` in zellij).
  */
-export function createSurface(name: string, command?: string): string {
-  return createSurfaceSplit(name, "right", undefined, command);
+export function createSurface(name: string, command?: string, cwd = process.cwd()): string {
+  return createSurfaceSplit(name, "right", undefined, command, cwd);
 }
 
 /**
@@ -155,6 +207,7 @@ export function createSurfaceSplit(
   direction: "left" | "right" | "up" | "down",
   fromSurface?: string,
   command?: string,
+  cwd = process.cwd(),
 ): string {
   const backend = requireMuxBackend();
 
@@ -175,38 +228,31 @@ export function createSurfaceSplit(
   }
 
   if (backend === "tmux") {
-    const args = ["split-window"];
-    if (direction === "left" || direction === "right") {
-      args.push("-h");
-    } else {
-      args.push("-v");
-    }
-    if (direction === "left" || direction === "up") {
-      args.push("-b");
-    }
-    if (fromSurface) {
-      args.push("-t", fromSurface);
-    }
-    args.push("-P", "-F", "#{pane_id}");
-
-    const pane = execFileSync("tmux", args, { encoding: "utf8" }).trim();
-    if (!pane.startsWith("%")) {
-      throw new Error(`Unexpected tmux split-window output: ${pane}`);
-    }
-
-    try {
-      execFileSync("tmux", ["select-pane", "-t", pane, "-T", name], { encoding: "utf8" });
-    } catch {
-      // Optional.
-    }
-    return pane;
+    const connection = defaultTmuxConnection();
+    const from = fromSurface
+      ? rememberedTmuxPaneRoute(fromSurface) ?? queryTmuxPaneRoute(connection, fromSurface)
+      : currentTmuxPaneRoute(connection);
+    const environment = Object.fromEntries(
+      ["PTC_ALLOW_UNSANDBOXED_SUBPROCESS", "PTC_USE_DOCKER"]
+        .map((key) => [key, process.env[key]])
+        .filter((entry): entry is [string, string] => entry[1] !== undefined),
+    );
+    return createTmuxPane({
+      connection,
+      from,
+      name,
+      direction,
+      cwd,
+      command,
+      environment,
+    }).paneID;
   }
 
   return zellijCreatePaneInSameTab({
     name,
     direction,
     fromSurface,
-    cwd: process.cwd(),
+    cwd,
     command,
   });
 }
@@ -230,9 +276,7 @@ export function renameCurrentPane(title: string): void {
   }
 
   if (backend === "tmux") {
-    const paneId = process.env.TMUX_PANE;
-    if (!paneId) throw new Error("TMUX_PANE not set");
-    execFileSync("tmux", ["select-pane", "-t", paneId, "-T", title], { encoding: "utf8" });
+    renameTmuxPane(currentTmuxPaneRoute(), title);
     return;
   }
 
@@ -255,12 +299,7 @@ export function renameCurrentTab(title: string): void {
   }
 
   if (backend === "tmux") {
-    const paneId = process.env.TMUX_PANE;
-    if (!paneId) throw new Error("TMUX_PANE not set");
-    const windowId = execFileSync("tmux", ["display-message", "-p", "-t", paneId, "#{window_id}"], {
-      encoding: "utf8",
-    }).trim();
-    execFileSync("tmux", ["rename-window", "-t", windowId, title], { encoding: "utf8" });
+    renameTmuxWindow(currentTmuxPaneRoute(), title);
     return;
   }
 
@@ -297,16 +336,7 @@ export function renameWorkspace(title: string): void {
   }
 
   if (backend === "tmux") {
-    const paneId = process.env.TMUX_PANE;
-    if (!paneId) throw new Error("TMUX_PANE not set");
-    const sessionId = execFileSync(
-      "tmux",
-      ["display-message", "-p", "-t", paneId, "#{session_id}"],
-      {
-        encoding: "utf8",
-      },
-    ).trim();
-    execFileSync("tmux", ["rename-session", "-t", sessionId, title], { encoding: "utf8" });
+    renameTmuxSession(currentTmuxPaneRoute(), title);
     return;
   }
 
@@ -327,8 +357,7 @@ export function sendCommand(surface: string, command: string): void {
   }
 
   if (backend === "tmux") {
-    execFileSync("tmux", ["send-keys", "-t", surface, "-l", command], { encoding: "utf8" });
-    execFileSync("tmux", ["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
+    sendTmuxCommand(requireTmuxRoute(surface), command);
     return;
   }
 
@@ -348,13 +377,7 @@ export function readScreen(surface: string, lines = 50): string {
   }
 
   if (backend === "tmux") {
-    return execFileSync(
-      "tmux",
-      ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`],
-      {
-        encoding: "utf8",
-      },
-    );
+    return captureTmuxPane(requireTmuxRoute(surface), lines);
   }
 
   return zellijReadScreen(surface, lines);
@@ -376,12 +399,7 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
   }
 
   if (backend === "tmux") {
-    const { stdout } = await execFileAsync(
-      "tmux",
-      ["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`],
-      { encoding: "utf8" },
-    );
-    return stdout;
+    return captureTmuxPaneAsync(requireTmuxRoute(surface), lines);
   }
 
   return zellijReadScreenAsync(surface, lines);
@@ -401,7 +419,7 @@ export function closeSurface(surface: string): void {
   }
 
   if (backend === "tmux") {
-    execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
+    closeTmuxPane(requireTmuxRoute(surface));
     return;
   }
 

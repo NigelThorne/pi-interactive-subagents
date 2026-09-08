@@ -45,7 +45,9 @@ tmux new -A -s pi 'pi'
 zellij --session pi   # then run: pi
 ```
 
-Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij` to force a specific backend.
+Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij` to force a specific backend. Inside a real tmux pane, `TMUX` plus `TMUX_PANE` takes precedence over inherited cmux variables unless an available backend is explicitly forced. Set `PI_SUBAGENT_TMUX_EXECUTABLE` when tmux is not on `PATH`.
+
+The tmux backend uses the socket path from `TMUX`, targets the parent pane by its stable `%N` ID, starts the child command during `split-window`, and creates the split detached. Switching to another window while a launch starts does not redirect the child or steal focus. Status checks require both pane ancestry and the expected Pi session path before reporting a child as running.
 
 ## What's Included
 
@@ -59,7 +61,7 @@ Optional: set `PI_SUBAGENT_MUX=cmux|tmux|zellij` to force a specific backend.
 | `subagent_status` | Verify tracked child pane, Pi process, completion-file state, and steer target |
 | `subagent_steer`  | Send a follow-up instruction to a running sub-agent                             |
 | `subagents_list`  | List available agent definitions                                                |
-| `set_tab_title`   | Update tab/window title to show progress (Zellij only)                          |
+| `set_tab_title`   | Update pane or window titles to show progress (tmux and Zellij)                 |
 | `subagent_resume` | Resume a previous sub-agent session (async); follow-up messages auto-append finish instructions |
 
 | Command                    | Description                          |

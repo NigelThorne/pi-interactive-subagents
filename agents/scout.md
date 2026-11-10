@@ -2,7 +2,7 @@
 name: scout
 description: Fast codebase reconnaissance - gathers context without making changes
 tools: read, bash
-model: openai-codex/gpt-5.4
+model: cpa/fast
 output: context.md
 spawning: false
 auto-exit: true

@@ -2,7 +2,7 @@
 name: worker
 description: Implements tasks from todos - writes code, runs tests, commits with polished messages
 tools: read, bash, write, edit
-model: openai-codex/gpt-5.4
+model: cpa/coding
 thinking: minimal
 spawning: false
 auto-exit: true

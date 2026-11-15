@@ -129,11 +129,12 @@ export function getNewEntries(sessionFile: string, afterLine: number): SessionEn
 }
 
 /**
- * Whether the last session entry is an assistant turn that ended normally.
- * Auto-exit workers must not remain idle after this terminal state.
+ * Whether the last conversational entry is a normally ended assistant turn.
+ * Metadata can trail the message. This alone does not prove the runtime settled.
  */
 export function hasCompletedAssistantTurn(entries: SessionEntry[]): boolean {
-  const last = entries.at(-1) as (MessageEntry & { message?: { stopReason?: string } }) | undefined;
+  const last = entries.findLast((entry) => entry.type === "message" || entry.type === "custom_message") as
+    (MessageEntry & { message?: { stopReason?: string } }) | undefined;
   return last?.type === "message" && last.message?.role === "assistant" && last.message.stopReason === "stop";
 }
 

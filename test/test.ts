@@ -34,6 +34,7 @@ import {
 import * as cmux from "../pi-extension/subagents/cmux.ts";
 import { normalizePaneId, paneSurface } from "../pi-extension/subagents/zellij.ts";
 import { steerRunningSubagent } from "../pi-extension/subagents/steering.ts";
+import * as statusModule from "../pi-extension/subagents/status.ts";
 import {
   formatSubagentStatus,
   inspectSubagentStatus,
@@ -98,6 +99,46 @@ const TOOL_RESULT = {
 };
 
 // --- Tests ---
+
+describe("/subagent_status command", () => {
+  const source = readFileSync(new URL("../pi-extension/subagents/index.ts", import.meta.url), "utf8");
+
+  function loadCommand(getSubagentStatusReport: () => { summary: string }) {
+    // Exercise the actual registration without loading Pi's terminal dependencies.
+    const start = source.indexOf('  pi.registerCommand("subagent_status",');
+    assert.notEqual(start, -1, "registers /subagent_status");
+    const end = source.indexOf("\n  // ── subagent_status tool", start);
+    assert.notEqual(end, -1);
+    const commands = new Map<string, any>();
+    new Function("pi", "getSubagentStatusReport", source.slice(start, end))({
+      registerCommand: (name: string, definition: unknown) => commands.set(name, definition),
+      sendUserMessage: () => assert.fail("must not trigger an AI turn"),
+      sendMessage: () => assert.fail("must not inject a message"),
+    }, getSubagentStatusReport);
+    return commands.get("subagent_status");
+  }
+
+  it("shows the empty-parent report without an AI turn", async () => {
+    const summary = "No subagents are tracked by this parent session.";
+    const command = loadCommand(() => ({ summary }));
+    const notices: unknown[] = [];
+    await command.handler("", { ui: { notify: (...args: unknown[]) => notices.push(args) } });
+    assert.deepEqual(notices, [[summary, "info"]]);
+  });
+
+  it("fetches a fresh report on each invocation and preserves multiline output", async () => {
+    let calls = 0;
+    const command = loadCommand(() => ({ summary: `Check ${++calls}\nWorker: running\nScout: unknown` }));
+    const notices: string[] = [];
+    const ctx = { ui: { notify: (text: string) => notices.push(text) } };
+    await command.handler("", ctx);
+    await command.handler("", ctx);
+    assert.deepEqual(notices, [
+      "Check 1\nWorker: running\nScout: unknown",
+      "Check 2\nWorker: running\nScout: unknown",
+    ]);
+  });
+});
 
 describe("session.ts", () => {
   let dir: string;
@@ -252,6 +293,16 @@ describe("session.ts", () => {
       } as any;
       assert.equal(hasCompletedAssistantTurn([USER_MSG as any, completed]), true);
       assert.equal(hasCompletedAssistantTurn([USER_MSG as any, ASSISTANT_MSG as any]), false);
+    });
+
+    it("recognizes completion despite trailing telemetry", () => {
+      const completed = {
+        ...ASSISTANT_MSG,
+        message: { ...ASSISTANT_MSG.message, stopReason: "stop" },
+      } as any;
+      const telemetry = { type: "custom", id: "telemetry", customType: "timeline-telemetry", data: { event: "agent_settled" } } as any;
+      assert.equal(hasCompletedAssistantTurn([completed, telemetry]), true);
+      assert.equal(hasCompletedAssistantTurn([completed, telemetry, USER_MSG as any]), false);
     });
 
     it("ignores a completed turn that predates a resumed session", () => {
@@ -511,6 +562,25 @@ describe("steering.ts", () => {
 });
 
 describe("status.ts", () => {
+  it("reads optional presence snapshots without failing on missing or malformed files", () => {
+    const dir = createTestDir();
+    try {
+      const sessionId = "session/encoded";
+      const file = join(dir, `${encodeURIComponent(sessionId)}.json`);
+      const readPresence = statusModule.readSubagentPresence;
+      assert.equal(typeof readPresence, "function");
+      assert.equal(readPresence(undefined, dir), undefined);
+      assert.equal(readPresence(sessionId, dir), undefined);
+      writeFileSync(file, '{"state":');
+      assert.equal(readPresence(sessionId, dir), undefined);
+      const record = { state: "idle", pid: 123, updatedAt: 9_000 };
+      writeFileSync(file, JSON.stringify(record));
+      assert.deepEqual(readPresence(sessionId, dir), record);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   const agent = {
     id: "worker-1",
     name: "Worker",
@@ -532,7 +602,7 @@ describe("status.ts", () => {
     );
     assert.equal(
       formatSubagentStatus(status),
-      'name="Dashboard CLI help [worker]"; lifecycle=unconfirmed; pane=present; doneFile=absent; childPi=not found',
+      'name="Dashboard CLI help [worker]"; lifecycle=unconfirmed; activity=unknown; pane=present; doneFile=absent; childPi=not found',
     );
   });
 
@@ -556,6 +626,72 @@ describe("status.ts", () => {
     assert.equal(result.paneState, "present");
     assert.deepEqual(result.processes.map((process) => process.pid), [123]);
     assert.equal(result.elapsedSeconds, 10);
+  });
+
+  describe("agent activity", () => {
+    const tracked = { ...agent, sessionId: "session-1" };
+    const processes = parseProcessRows("123 100 ttys001 S+ 00:10 pi --session /tmp/worker-session.jsonl", agent.sessionFile);
+    const presence = {
+      sessionID: tracked.sessionId,
+      sessionFile: tracked.sessionFile,
+      pid: 123,
+      state: "idle",
+      updatedAt: 9_000,
+    };
+    const probe = { doneFileExists: false, paneState: "present" as const, processes, now: 11_000 };
+
+    it("distinguishes a live idle agent from a working agent", () => {
+      const idle = inspectSubagentStatus(tracked, { ...probe, presence });
+      assert.equal(idle.lifecycle, "running");
+      assert.equal(idle.activity, "idle");
+      assert.equal(idle.activityUpdatedAt, 9_000);
+      assert.equal(idle.activityAgeSeconds, 2);
+      assert.match(formatSubagentStatus(idle), /lifecycle=running; activity=idle; activityObservedAgo=2s/);
+      assert.match(formatSubagentStatus(idle), /steerTarget="worker-1"/);
+
+      const busy = inspectSubagentStatus(tracked, { ...probe, presence: { ...presence, state: "processing" } });
+      assert.equal(busy.activity, "processing");
+    });
+
+    for (const [label, invalid] of Object.entries({
+      missing: undefined,
+      malformed: "idle",
+      null: null,
+      "wrong session": { ...presence, sessionID: "other" },
+      "wrong path": { ...presence, sessionFile: "/other.jsonl" },
+      "wrong PID": { ...presence, pid: 456 },
+      stopped: { ...presence, state: "stopped" },
+      "unknown state": { ...presence, state: "busy" },
+      "future timestamp": { ...presence, updatedAt: 12_000 },
+      "missing timestamp": { ...presence, updatedAt: undefined },
+      "invalid timestamp": { ...presence, updatedAt: "9000" },
+      "before launch": { ...presence, updatedAt: 500 },
+    })) {
+      it(`reports unknown activity for ${label} presence`, () => {
+        const result = inspectSubagentStatus(tracked, { ...probe, presence: invalid });
+        assert.equal(result.lifecycle, "running");
+        assert.equal(result.activity, "unknown");
+        assert.equal(result.activityUpdatedAt, undefined);
+      });
+    }
+
+    it("rejects presence older than three 15-second heartbeats", () => {
+      assert.equal(inspectSubagentStatus(tracked, { ...probe, presence, now: 54_000 }).activity, "idle");
+      const result = inspectSubagentStatus(tracked, { ...probe, presence, now: 54_001 });
+      assert.equal(result.activity, "unknown");
+      assert.match(formatSubagentStatus(result), /activity=unknown/);
+    });
+
+    it("does not use presence as proof of a live process or of completion", () => {
+      const missing = inspectSubagentStatus(tracked, { ...probe, presence, processes: [] });
+      assert.equal(missing.lifecycle, "unconfirmed");
+      assert.equal(missing.activity, "unknown");
+      const done = inspectSubagentStatus(tracked, { ...probe, presence, doneFileExists: true });
+      assert.equal(done.lifecycle, "completed");
+      assert.equal(done.activity, "unknown");
+      const ambiguous = inspectSubagentStatus(tracked, { ...probe, presence, processes: [...processes, { ...processes[0], pid: 456 }] });
+      assert.equal(ambiguous.activity, "unknown");
+    });
   });
 
   it("does not call a pane with no child Pi process running", () => {

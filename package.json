@@ -13,7 +13,8 @@
   },
   "type": "module",
   "scripts": {
-    "test": "npx --yes tsx --test test/test.ts test/tmux.test.ts"
+    "test": "npx --yes tsx --test test/test.ts test/tmux.test.ts test/lifecycle.test.ts test/registry-profiles.test.ts test/host-wiring.test.ts test/session-messaging.test.ts",
+    "test:pi": "npx --yes tsx --test test/pi-lifecycle.test.ts"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
@@ -25,5 +26,8 @@
       "./pi-extension/subagents/index.ts",
       "./pi-extension/session-artifacts/index.ts"
     ]
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
   }
 }

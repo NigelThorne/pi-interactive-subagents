@@ -6,7 +6,8 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { writeFileSync } from "node:fs";
+import { registerAutoExit, writeCompletion } from "./lifecycle.ts";
+import { findLastAssistantMessage, type SessionEntry } from "./session.ts";
 
 export default function (pi: ExtensionAPI) {
   let toolNames: string[] = [];
@@ -82,25 +83,7 @@ export default function (pi: ExtensionAPI) {
     renderWidget(ctx, null);
   });
 
-  // Auto-exit: when the agent loop ends, shut down automatically.
-  // If the user sends any input (stops the agent, types a message), auto-exit
-  // is permanently disabled for this session — the user has taken over.
-  // Enabled via `auto-exit: true` in agent frontmatter.
-  if (autoExit) {
-    let userTookOver = false;
-
-    pi.on("input", (event) => {
-      if ((event as any).source === "user") {
-        userTookOver = true;
-      }
-    });
-
-    pi.on("agent_end", (_event, ctx) => {
-      if (!userTookOver) {
-        ctx.shutdown();
-      }
-    });
-  }
+  registerAutoExit(pi, autoExit, process.env.PI_SUBAGENT_SUMMARY_FILE);
 
   // Toggle expand/collapse with Ctrl+J
   pi.registerShortcut("ctrl+j", {
@@ -119,6 +102,10 @@ export default function (pi: ExtensionAPI) {
       "It will close this session and return your results to the main session. " +
       "Your LAST assistant message before calling this becomes the summary returned to the caller.",
     parameters: Type.Object({
+      status: Type.Optional(Type.String({
+        enum: ["completed", "blocked", "failed"],
+        description: "Task outcome. Use blocked or failed when the parent must resolve a problem. Defaults to completed.",
+      })),
       summary: Type.Optional(
         Type.String({
           description:
@@ -130,13 +117,19 @@ export default function (pi: ExtensionAPI) {
       // Pi may append a final "Done." assistant message after shutdown. Persist
       // the model-supplied verdict out-of-band so the parent receives it exactly.
       const summaryFile = process.env.PI_SUBAGENT_SUMMARY_FILE;
-      if (summaryFile && params.summary?.trim()) {
-        writeFileSync(summaryFile, params.summary.trim(), "utf8");
+      if (summaryFile) {
+        writeCompletion(summaryFile, {
+          status: params.status === "blocked" || params.status === "failed" ? params.status : "completed",
+          summary: params.summary?.trim() ||
+            findLastAssistantMessage(ctx.sessionManager.getBranch() as SessionEntry[]) ||
+            "Subagent reported completion without a summary.",
+        });
       }
       ctx.shutdown();
       return {
         content: [{ type: "text", text: "Shutting down subagent session." }],
         details: {},
+        terminate: true,
       };
     },
   });

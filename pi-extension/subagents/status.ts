@@ -1,7 +1,14 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export type PaneState = "present" | "missing" | "unknown";
 export type SubagentLifecycle = "running" | "completed" | "unconfirmed" | "stale" | "unknown";
+export type SubagentActivity = "processing" | "idle" | "unknown";
+
+// The optional pi-session-manager-presence publisher heartbeats every 15 seconds.
+const PRESENCE_MAX_AGE_MS = 45_000;
 
 export interface StatusAgent {
   id: string;
@@ -33,6 +40,9 @@ export interface SubagentStatus {
   sessionFile: string;
   surface: string;
   lifecycle: SubagentLifecycle;
+  activity: SubagentActivity;
+  activityUpdatedAt?: number;
+  activityAgeSeconds?: number;
   paneState: PaneState;
   doneFileExists: boolean;
   elapsedSeconds: number;
@@ -40,6 +50,7 @@ export interface SubagentStatus {
 }
 
 interface StatusProbe {
+  presence?: unknown;
   doneFileExists: boolean;
   paneState: PaneState;
   processes: ChildPiProcess[];
@@ -127,6 +138,19 @@ export function listChildPiProcesses(sessionFile: string): ChildPiProcess[] {
   return parseProcessRows(output, sessionFile);
 }
 
+/** Optional telemetry from pi-session-manager-presence, not a liveness probe. */
+export function readSubagentPresence(
+  sessionId: string | undefined,
+  directory = join(homedir(), ".pi", "agent", "session-manager", "live"),
+): unknown {
+  if (!sessionId) return undefined;
+  try {
+    return JSON.parse(readFileSync(join(directory, `${encodeURIComponent(sessionId)}.json`), "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
 export function formatSubagentStatus(status: SubagentStatus): string {
   const processes = status.processes
     .map((process) => `pid=${process.pid} tty=${process.tty} elapsed=${process.elapsed}`)
@@ -135,6 +159,8 @@ export function formatSubagentStatus(status: SubagentStatus): string {
     `name=${JSON.stringify(status.name)}`,
     ...(status.lifecycle === "running" ? [`steerTarget=${JSON.stringify(status.id)} (use as subagent_steer.target)`] : []),
     `lifecycle=${status.lifecycle}`,
+    `activity=${status.activity}`,
+    ...(status.activityAgeSeconds !== undefined ? [`activityObservedAgo=${status.activityAgeSeconds}s`] : []),
     `pane=${status.paneState}`,
     `doneFile=${status.doneFileExists ? "present" : "absent"}`,
     `childPi=${processes || "not found"}`,
@@ -152,6 +178,28 @@ export function inspectSubagentStatus(agent: StatusAgent, probe: StatusProbe): S
           ? "stale"
           : "unknown";
 
+  // Presence is advisory. Only accept a fresh record for this exact live child.
+  // Missing telemetry must never turn process liveness into a claim of activity.
+  const presence = probe.presence as Record<string, unknown> | null | undefined;
+  let activity: SubagentActivity = "unknown";
+  let activityUpdatedAt: number | undefined;
+  if (
+    lifecycle === "running" &&
+    probe.processes.length === 1 &&
+    presence && typeof presence === "object" &&
+    agent.sessionId && presence.sessionID === agent.sessionId &&
+    presence.sessionFile === agent.sessionFile &&
+    presence.pid === probe.processes[0].pid &&
+    (presence.state === "idle" || presence.state === "processing") &&
+    typeof presence.updatedAt === "number" && Number.isFinite(presence.updatedAt) &&
+    presence.updatedAt >= agent.startTime &&
+    presence.updatedAt <= probe.now &&
+    probe.now - presence.updatedAt <= PRESENCE_MAX_AGE_MS
+  ) {
+    activity = presence.state;
+    activityUpdatedAt = presence.updatedAt;
+  }
+
   return {
     id: agent.id,
     name: agent.name,
@@ -160,6 +208,11 @@ export function inspectSubagentStatus(agent: StatusAgent, probe: StatusProbe): S
     sessionFile: agent.sessionFile,
     surface: agent.surface,
     lifecycle,
+    activity,
+    ...(activityUpdatedAt !== undefined ? {
+      activityUpdatedAt,
+      activityAgeSeconds: Math.floor((probe.now - activityUpdatedAt) / 1000),
+    } : {}),
     paneState: probe.paneState,
     doneFileExists: probe.doneFileExists,
     elapsedSeconds: Math.max(0, Math.floor((probe.now - agent.startTime) / 1000)),

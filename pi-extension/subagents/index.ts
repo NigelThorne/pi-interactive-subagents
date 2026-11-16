@@ -589,10 +589,14 @@ async function launchSubagent(
   // timing race where typed commands can land in the wrong shell or pane.
   const surfacePreCreated = !!options?.surface;
   const muxBackend = getMuxBackend();
-  if ((muxBackend === "zellij" || muxBackend === "tmux") && !process.env.PI_SUBAGENT_NAME) {
+  if (
+    (muxBackend === "zellij" || muxBackend === "tmux" || muxBackend === "rex") &&
+    !process.env.PI_SUBAGENT_NAME
+  ) {
     prepareForSubagents(`π ${displayName}`);
   }
-  const launchesDirectly = muxBackend === "zellij" || muxBackend === "tmux";
+  const launchesDirectly =
+    muxBackend === "zellij" || muxBackend === "tmux" || muxBackend === "rex";
   const surface =
     options?.surface ??
     (launchesDirectly
@@ -1450,7 +1454,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           if (typeof header.cwd === "string" && header.cwd.startsWith("/")) resumeCwd = header.cwd;
         } catch {}
         const muxBackend = getMuxBackend();
-        const launchesDirectly = muxBackend === "zellij" || muxBackend === "tmux";
+        const launchesDirectly =
+          muxBackend === "zellij" || muxBackend === "tmux" || muxBackend === "rex";
         const surface = launchesDirectly
           ? createSurface(displayName, command, resumeCwd)
           : createSurface(displayName, undefined, resumeCwd);

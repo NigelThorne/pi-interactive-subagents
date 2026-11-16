@@ -30,10 +30,20 @@ import {
   renameSession as zellijRenameSession,
   sendCommand as zellijSendCommand,
 } from "./zellij.ts";
+import {
+  closeBlock as rexCloseBlock,
+  createBlock as rexCreateBlock,
+  readScreen as rexReadScreen,
+  readScreenAsync as rexReadScreenAsync,
+  renameCurrentBlock as rexRenameCurrentBlock,
+  renameCurrentWindow as rexRenameCurrentWindow,
+  renameSession as rexRenameSession,
+  sendCommand as rexSendCommand,
+} from "./rex.ts";
 
 const execFileAsync = promisify(execFile);
 
-export type MuxBackend = "cmux" | "tmux" | "zellij";
+export type MuxBackend = "cmux" | "tmux" | "zellij" | "rex";
 
 const commandAvailability = new Map<string, boolean>();
 
@@ -56,7 +66,7 @@ function hasCommand(command: string): boolean {
 
 function muxPreference(): MuxBackend | null {
   const pref = (process.env.PI_SUBAGENT_MUX ?? "").trim().toLowerCase();
-  if (pref === "cmux" || pref === "tmux" || pref === "zellij") return pref;
+  if (pref === "cmux" || pref === "tmux" || pref === "zellij" || pref === "rex") return pref;
   return null;
 }
 
@@ -80,6 +90,10 @@ function isZellijRuntimeAvailable(): boolean {
   return !!(process.env.ZELLIJ || process.env.ZELLIJ_SESSION_NAME) && hasCommand("zellij");
 }
 
+function isRexRuntimeAvailable(): boolean {
+  return !!process.env.REX_SESSION && !!process.env.REX_BLOCK && hasCommand("rex");
+}
+
 export function isCmuxAvailable(): boolean {
   return isCmuxRuntimeAvailable();
 }
@@ -92,15 +106,23 @@ export function isZellijAvailable(): boolean {
   return isZellijRuntimeAvailable();
 }
 
+export function isRexAvailable(): boolean {
+  return isRexRuntimeAvailable();
+}
+
 export function getMuxBackend(): MuxBackend | null {
   const pref = muxPreference();
   if (pref === "cmux") return isCmuxRuntimeAvailable() ? "cmux" : null;
   if (pref === "tmux") return isTmuxRuntimeAvailable() ? "tmux" : null;
   if (pref === "zellij") return isZellijRuntimeAvailable() ? "zellij" : null;
+  if (pref === "rex") return isRexRuntimeAvailable() ? "rex" : null;
 
   // A real tmux pane is the strongest runtime signal. Do not let inherited
   // cmux variables route pane actions away from the process's actual parent.
+  // Rex ranks above cmux/zellij for the same reason: REX_BLOCK identifies the
+  // process's actual pane, while cmux/zellij variables can be inherited.
   if (isTmuxRuntimeAvailable()) return "tmux";
+  if (isRexRuntimeAvailable()) return "rex";
   if (isCmuxRuntimeAvailable()) return "cmux";
   if (isZellijRuntimeAvailable()) return "zellij";
   return null;
@@ -114,7 +136,7 @@ export function isMuxAvailable(): boolean {
  * `set_tab_title` is exposed only where stable pane/window targeting is available.
  */
 export function isTabTitleSupported(backend: MuxBackend | null = getMuxBackend()): boolean {
-  return backend === "tmux" || backend === "zellij";
+  return backend === "tmux" || backend === "zellij" || backend === "rex";
 }
 
 export function muxSetupHint(): string {
@@ -128,7 +150,10 @@ export function muxSetupHint(): string {
   if (pref === "zellij") {
     return "Start pi inside zellij (`zellij --session pi`, then run `pi`).";
   }
-  return "Start pi inside cmux (`cmux pi`), tmux (`tmux new -A -s pi 'pi'`), or zellij (`zellij --session pi`, then run `pi`).";
+  if (pref === "rex") {
+    return "Start pi inside a Rex terminal (`rex run -- pi` or run `pi` in a Rex pane).";
+  }
+  return "Start pi inside cmux (`cmux pi`), tmux (`tmux new -A -s pi 'pi'`), zellij (`zellij --session pi`, then run `pi`), or a Rex terminal.";
 }
 
 function requireMuxBackend(): MuxBackend {
@@ -248,6 +273,16 @@ export function createSurfaceSplit(
     }).paneID;
   }
 
+  if (backend === "rex") {
+    return rexCreateBlock({
+      name,
+      direction,
+      fromSurface,
+      cwd,
+      command,
+    });
+  }
+
   return zellijCreatePaneInSameTab({
     name,
     direction,
@@ -280,6 +315,11 @@ export function renameCurrentPane(title: string): void {
     return;
   }
 
+  if (backend === "rex") {
+    rexRenameCurrentBlock(title);
+    return;
+  }
+
   zellijRenameCurrentPane(title);
 }
 
@@ -303,6 +343,11 @@ export function renameCurrentTab(title: string): void {
     return;
   }
 
+  if (backend === "rex") {
+    rexRenameCurrentWindow(title);
+    return;
+  }
+
   zellijRenameCurrentTab(title);
 }
 
@@ -314,7 +359,7 @@ export function shouldRenameWorkspace(backend: MuxBackend): boolean {
     return process.env.PI_SUBAGENT_RENAME_TMUX_SESSION === "1";
   }
 
-  if (backend === "zellij") {
+  if (backend === "zellij" || backend === "rex") {
     return false;
   }
 
@@ -340,6 +385,11 @@ export function renameWorkspace(title: string): void {
     return;
   }
 
+  if (backend === "rex") {
+    rexRenameSession(title);
+    return;
+  }
+
   zellijRenameSession(title);
 }
 
@@ -361,6 +411,11 @@ export function sendCommand(surface: string, command: string): void {
     return;
   }
 
+  if (backend === "rex") {
+    rexSendCommand(surface, command);
+    return;
+  }
+
   zellijSendCommand(surface, command);
 }
 
@@ -378,6 +433,10 @@ export function readScreen(surface: string, lines = 50): string {
 
   if (backend === "tmux") {
     return captureTmuxPane(requireTmuxRoute(surface), lines);
+  }
+
+  if (backend === "rex") {
+    return rexReadScreen(surface, lines);
   }
 
   return zellijReadScreen(surface, lines);
@@ -402,6 +461,10 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
     return captureTmuxPaneAsync(requireTmuxRoute(surface), lines);
   }
 
+  if (backend === "rex") {
+    return rexReadScreenAsync(surface, lines);
+  }
+
   return zellijReadScreenAsync(surface, lines);
 }
 
@@ -420,6 +483,11 @@ export function closeSurface(surface: string): void {
 
   if (backend === "tmux") {
     closeTmuxPane(requireTmuxRoute(surface));
+    return;
+  }
+
+  if (backend === "rex") {
+    rexCloseBlock(surface);
     return;
   }
 

@@ -13,6 +13,19 @@ type Ack = { accepted: true; instance: string } | { accepted: false; error: stri
 const DEFAULT_DIRECTORY = join(homedir(), ".pi", "agent", "session-messaging");
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const ACK_TIMEOUT_MS = 2_000;
+/*
+ * Wire framing (psc #27). JSON shapes are unchanged; framing is newline-based:
+ *   - new server writes a bare "\n" banner on connect, parses the request at the first
+ *     newline (or on 'end' for old clients), handles it exactly once, then ends with ACK + "\n".
+ *   - new client writes request + "\n" and waits for the ACK line without half-closing.
+ *     If no banner arrives within LEGACY_HALF_CLOSE_MS it half-closes for old servers.
+ * Compatibility:
+ *   new client -> new server : delivered + ACKed (also under pi 1.1.0, no half-open needed)
+ *   old client -> new server : delivered + ACKed when the runtime honours half-open (as before)
+ *   new client -> old server : delivered; ACK may be lost under pi 1.1.0 (same as before)
+ *   old client -> old server : unchanged
+ */
+const LEGACY_HALF_CLOSE_MS = 300;
 
 function key(value: string): string { return createHash("sha256").update(value).digest("hex").slice(0, 32); }
 function sameIdentity(a: SessionIdentity, b?: SessionIdentity): boolean {
@@ -77,13 +90,15 @@ export class SessionMessagingRegistry {
       connection.once("close", () => this.connections.delete(connection));
       connection.setTimeout(ACK_TIMEOUT_MS, () => connection.destroy());
       let raw = "";
+      let handled = false;
       connection.on("error", () => { /* Peer/protocol failures must not crash the Pi receiver. */ });
       connection.setEncoding("utf8");
-      connection.on("data", (chunk) => {
-        raw += chunk;
-        if (Buffer.byteLength(raw) > MAX_REQUEST_BYTES) connection.destroy(new Error("request too large"));
-      });
-      connection.on("end", async () => {
+      // Banner: a bare newline tells new clients this server speaks newline framing,
+      // so they never half-close. Old clients JSON.parse the ACK and ignore leading whitespace.
+      connection.write("\n");
+      const handle = async () => {
+        if (handled) return; // parse once even if both newline and 'end' arrive
+        handled = true;
         let ack: Ack;
         try {
           if (this.closing) throw new Error("receiver is shutting down");
@@ -94,8 +109,16 @@ export class SessionMessagingRegistry {
           await this.accept({ text: request.message, sender, relationship: sameIdentity(sender, this.parent) ? "parent" : "other" });
           ack = { accepted: true, instance: this.instance };
         } catch (error: any) { ack = { accepted: false, error: error?.message ?? String(error) }; }
-        connection.end(JSON.stringify(ack));
+        if (!connection.destroyed && connection.writable) connection.end(JSON.stringify(ack) + "\n");
+      };
+      connection.on("data", (chunk) => {
+        if (handled) return;
+        raw += chunk;
+        if (Buffer.byteLength(raw) > MAX_REQUEST_BYTES) { connection.destroy(new Error("request too large")); return; }
+        const newline = raw.indexOf("\n");
+        if (newline >= 0) { raw = raw.slice(0, newline); void handle(); }
       });
+      connection.on("end", () => { void handle(); });
     });
     await new Promise<void>((resolvePromise, reject) => {
       server.once("error", reject);
@@ -159,23 +182,33 @@ export class SessionMessagingRegistry {
     const route = matches[0];
     const request: Request = { version: 1, instance: route.instance, sender: this.session, message };
     return await new Promise<RouteRecord>((resolvePromise, reject) => {
-      const socket = createConnection(route.socket);
+      // Never half-close to a new server (pi 1.1.0 drops allowHalfOpen, so the ACK would be lost).
+      // If no banner arrives, assume an old server that only parses on 'end' and half-close.
+      const socket = createConnection({ path: route.socket, allowHalfOpen: true });
       let raw = "";
-      const timer = setTimeout(() => { socket.destroy(); reject(new Error(`Session "${target}" did not acknowledge the steer.`)); }, ACK_TIMEOUT_MS);
-      const fail = (error: Error) => { clearTimeout(timer); reject(new Error(`Session "${target}" is unavailable or stale: ${error.message}`)); };
-      socket.setEncoding("utf8");
-      socket.once("error", fail);
-      socket.on("data", chunk => { raw += chunk; });
-      socket.on("connect", () => socket.end(JSON.stringify(request)));
-      socket.on("end", () => {
-        clearTimeout(timer);
+      let settled = false;
+      const timer = setTimeout(() => { socket.destroy(); finish(() => reject(new Error(`Session "${target}" did not acknowledge the steer.`))); }, ACK_TIMEOUT_MS);
+      const legacy = setTimeout(() => { if (!raw && !socket.destroyed) socket.end(); }, LEGACY_HALF_CLOSE_MS);
+      const finish = (action: () => void) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(legacy); action(); };
+      const settleFromAck = (text: string) => finish(() => {
         try {
-          const ack = JSON.parse(raw) as Ack;
+          const ack = JSON.parse(text) as Ack;
           if (!ack.accepted) return reject(new Error(`Receiver rejected steer: ${ack.error}`));
           if (ack.instance !== route.instance) return reject(new Error("Receiver ACK came from a different instance."));
           resolvePromise(route);
         } catch (error: any) { reject(new Error(`Session "${target}" returned an invalid ACK: ${error?.message ?? error}`)); }
       });
+      socket.setEncoding("utf8");
+      socket.once("error", (error: Error) => finish(() => reject(new Error(`Session "${target}" is unavailable or stale: ${error.message}`))));
+      socket.on("data", chunk => {
+        raw += chunk;
+        const line = raw.replace(/^\n+/, "");
+        const newline = line.indexOf("\n");
+        if (newline >= 0) { settleFromAck(line.slice(0, newline)); socket.end(); }
+      });
+      socket.on("connect", () => socket.write(JSON.stringify(request) + "\n"));
+      socket.on("end", () => { settleFromAck(raw); socket.end(); });
+      socket.on("close", () => settleFromAck(raw));
     });
   }
 }

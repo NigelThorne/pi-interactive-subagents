@@ -49,8 +49,11 @@ export class SessionMessagingRegistry {
   private aliases: string[];
   readonly directory: string;
   readonly accept: (message: IncomingSteer) => Promise<void> | void;
+  /** Test seam: pi 1.1.0's runtime effectively ignores allowHalfOpen on the server socket. */
+  private readonly allowHalfOpen: boolean;
 
-  constructor(options: { directory?: string; session: SessionIdentity; parent?: SessionIdentity; aliases?: string[]; accept: (message: IncomingSteer) => Promise<void> | void }) {
+  constructor(options: { directory?: string; session: SessionIdentity; parent?: SessionIdentity; aliases?: string[]; accept: (message: IncomingSteer) => Promise<void> | void; allowHalfOpen?: boolean }) {
+    this.allowHalfOpen = options.allowHalfOpen ?? true;
     this.directory = options.directory ?? DEFAULT_DIRECTORY;
     this.session = normalizeIdentity(options.session);
     this.parent = options.parent && normalizeIdentity(options.parent);
@@ -68,7 +71,7 @@ export class SessionMessagingRegistry {
     try { chmodSync(this.directory, 0o700); } catch {}
     const socket = this.socketPath;
     rmSync(socket, { force: true });
-    const server = createServer({ allowHalfOpen: true }, (connection) => {
+    const server = createServer({ allowHalfOpen: this.allowHalfOpen }, (connection) => {
       if (this.closing) { connection.destroy(); return; }
       this.connections.add(connection);
       connection.once("close", () => this.connections.delete(connection));

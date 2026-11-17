@@ -15,13 +15,14 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 const ACK_TIMEOUT_MS = 2_000;
 /*
  * Wire framing (psc #27). JSON shapes are unchanged; framing is newline-based:
- *   - new server writes a bare "\n" banner on connect, parses the request at the first
- *     newline (or on 'end' for old clients), handles it exactly once, then ends with ACK + "\n".
+ *   - new server parses the request at the first newline (or on 'end' for old clients),
+ *     handles it exactly once, then ends with ACK + "\n".
  *   - new client writes request + "\n" and waits for the ACK line without half-closing.
- *     If no banner arrives within LEGACY_HALF_CLOSE_MS it half-closes for old servers.
+ *     If no ACK arrives within LEGACY_HALF_CLOSE_MS it half-closes for old servers
+ *     (so a new server whose accept takes longer than that may lose the ACK on pi 1.1.0).
  * Compatibility:
  *   new client -> new server : delivered + ACKed (also under pi 1.1.0, no half-open needed)
- *   old client -> new server : delivered + ACKed when the runtime honours half-open (as before)
+ *   old client -> new server : delivered; ACK only where the runtime honours half-open (as before)
  *   new client -> old server : delivered; ACK may be lost under pi 1.1.0 (same as before)
  *   old client -> old server : unchanged
  */
@@ -93,9 +94,6 @@ export class SessionMessagingRegistry {
       let handled = false;
       connection.on("error", () => { /* Peer/protocol failures must not crash the Pi receiver. */ });
       connection.setEncoding("utf8");
-      // Banner: a bare newline tells new clients this server speaks newline framing,
-      // so they never half-close. Old clients JSON.parse the ACK and ignore leading whitespace.
-      connection.write("\n");
       const handle = async () => {
         if (handled) return; // parse once even if both newline and 'end' arrive
         handled = true;
@@ -183,12 +181,12 @@ export class SessionMessagingRegistry {
     const request: Request = { version: 1, instance: route.instance, sender: this.session, message };
     return await new Promise<RouteRecord>((resolvePromise, reject) => {
       // Never half-close to a new server (pi 1.1.0 drops allowHalfOpen, so the ACK would be lost).
-      // If no banner arrives, assume an old server that only parses on 'end' and half-close.
+      // If no ACK arrives promptly, assume an old server that only parses on 'end' and half-close.
       const socket = createConnection({ path: route.socket, allowHalfOpen: true });
       let raw = "";
       let settled = false;
       const timer = setTimeout(() => { socket.destroy(); finish(() => reject(new Error(`Session "${target}" did not acknowledge the steer.`))); }, ACK_TIMEOUT_MS);
-      const legacy = setTimeout(() => { if (!raw && !socket.destroyed) socket.end(); }, LEGACY_HALF_CLOSE_MS);
+      const legacy = setTimeout(() => { if (!settled && !socket.destroyed) socket.end(); }, LEGACY_HALF_CLOSE_MS);
       const finish = (action: () => void) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(legacy); action(); };
       const settleFromAck = (text: string) => finish(() => {
         try {
@@ -202,7 +200,7 @@ export class SessionMessagingRegistry {
       socket.once("error", (error: Error) => finish(() => reject(new Error(`Session "${target}" is unavailable or stale: ${error.message}`))));
       socket.on("data", chunk => {
         raw += chunk;
-        const line = raw.replace(/^\n+/, "");
+        const line = raw;
         const newline = line.indexOf("\n");
         if (newline >= 0) { settleFromAck(line.slice(0, newline)); socket.end(); }
       });

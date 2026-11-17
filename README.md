@@ -179,12 +179,12 @@ The target may be a caller-local launch `id`, an exact registered Pi `sessionId`
 
 The receiver derives whether the sender is its parent by comparing the sender's runtime session identity with parent lineage recorded in the receiver's own session header. Message prose and sender-supplied role claims cannot set that label. A resumed session keeps its recorded creation lineage. Fork lineage also comes from the new session header; this steering change does not alter how the launcher creates forks. Missing, stale, duplicate, or ambiguous routes fail closed, and success means the receiver acknowledged that Pi accepted the message for delivery, not that the model acted on it.
 
-Wire compatibility: requests and ACKs are newline-framed, so the ACK no longer depends on half-open sockets (Pi 1.1.0 drops them). The receiver sends a newline banner on connect; senders that see it keep the socket open for the ACK, and senders that don't (older receivers) fall back to half-closing.
+Wire compatibility: requests and ACKs are newline-framed, so the ACK no longer depends on half-open sockets (Pi 1.1.0 drops them). New senders keep the socket open for the ACK and half-close only if no ACK arrives within 300 ms, which lets older receivers still process the request. Older senders, including psc's own client, still half-close, so their ACK stays lost on Pi 1.1.0 until they adopt newline framing.
 
 | Sender → Receiver | Delivered | ACK |
 | --- | --- | --- |
 | new → new | yes | yes, including Pi 1.1.0 |
-| old → new | yes | yes where half-open works |
+| old → new | yes | only where half-open works (not Pi 1.1.0) |
 | new → old | yes | may be lost on Pi 1.1.0, as before |
 | old → old | yes | unchanged |
 

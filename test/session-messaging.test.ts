@@ -155,6 +155,73 @@ describe("cross-session messaging", () => {
   });
 });
 
+describe("wire framing and compatibility (psc #27)", () => {
+  const mk = (dir: string, id: string, accept: () => void, allowHalfOpen?: boolean) =>
+    new SessionMessagingRegistry({ directory: dir, session: identity(id), accept, allowHalfOpen } as any);
+
+  it("new client receives ACK from a server whose socket drops half-open (pi 1.1.0)", async () => {
+    const dir = mkdtempSync(join(shortTmp, "pi-steer-halfopen-"));
+    let accepts = 0;
+    const receiver = mk(dir, "receiver", () => { accepts++; }, false);
+    const sender = mk(dir, "sender", () => {});
+    try {
+      await receiver.start(); await sender.start();
+      await sender.send("receiver", "ack me");
+      assert.equal(accepts, 1);
+    } finally { await receiver.close(); await sender.close(); rmSync(dir, {recursive:true, force:true}); }
+  });
+
+  it("old client (no newline, half-close) is delivered once and ACKed by a new server", async () => {
+    const dir = mkdtempSync(join(shortTmp, "pi-steer-oldclient-"));
+    let accepts = 0;
+    const receiver = mk(dir, "receiver", () => { accepts++; });
+    try {
+      await receiver.start();
+      const route = receiver.list()[0];
+      const raw = await new Promise<string>((resolve, reject) => {
+        const s = createConnection({ path: route.socket, allowHalfOpen: true } as any); let out = "";
+        s.setEncoding("utf8"); s.on("data", c => { out += c; }); s.on("end", () => resolve(out)); s.on("error", reject);
+        s.on("connect", () => s.end(JSON.stringify({ version: 1, instance: route.instance, sender: identity("old"), message: "legacy" })));
+      });
+      assert.equal(JSON.parse(raw).accepted, true);
+      assert.equal(accepts, 1);
+    } finally { await receiver.close(); rmSync(dir, {recursive:true, force:true}); }
+  });
+
+  it("request with newline then half-close is delivered exactly once", async () => {
+    const dir = mkdtempSync(join(shortTmp, "pi-steer-once-"));
+    let accepts = 0;
+    const receiver = mk(dir, "receiver", () => { accepts++; });
+    try {
+      await receiver.start();
+      const route = receiver.list()[0];
+      await new Promise<void>((resolve, reject) => {
+        const s = createConnection({ path: route.socket, allowHalfOpen: true } as any);
+        s.on("data", () => {}); s.on("close", () => resolve()); s.on("error", reject);
+        s.on("connect", () => s.end(JSON.stringify({ version: 1, instance: route.instance, sender: identity("x"), message: "once" }) + "\n"));
+      });
+      await new Promise(r => setTimeout(r, 50));
+      assert.equal(accepts, 1);
+    } finally { await receiver.close(); rmSync(dir, {recursive:true, force:true}); }
+  });
+
+  it("new client still delivers to an old server (ACK only on end)", async () => {
+    const { createServer } = await import("node:net");
+    const dir = mkdtempSync(join(shortTmp, "pi-steer-oldserver-"));
+    const sock = join(dir, "old.sock");
+    const got: string[] = [];
+    const server = createServer({ allowHalfOpen: true }, c => { let raw = ""; c.setEncoding("utf8"); c.on("data", d => { raw += d; }); c.on("end", () => { const r = JSON.parse(raw); got.push(r.message); c.end(JSON.stringify({ accepted: true, instance: r.instance })); }); });
+    await new Promise<void>(r => server.listen(sock, r));
+    writeFileSync(join(dir, "old.json"), JSON.stringify({ version: 1, instance: "i1", session: identity("old"), aliases: [], socket: sock, pid: process.pid, startedAt: 0 }));
+    const sender = mk(dir, "sender", () => {});
+    try {
+      await sender.start();
+      await sender.send("old", "to old server").catch(() => {});
+      assert.deepEqual(got, ["to old server"]);
+    } finally { await sender.close(); server.close(); rmSync(dir, {recursive:true, force:true}); }
+  });
+});
+
 describe("recorded parent lineage", () => {
   it("uses the session header, not inherited environment", () => {
     const dir = mkdtempSync(join(shortTmp, "pi-lineage-test-"));

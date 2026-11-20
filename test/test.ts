@@ -581,6 +581,52 @@ describe("status.ts", () => {
     }
   });
 
+  it("prefers psc-presence records, normalising them, and falls back to the legacy path", () => {
+    const legacy = createTestDir();
+    const psc = createTestDir();
+    try {
+      const read = statusModule.readSubagentPresence;
+      const sessionId = "s-1";
+      const base = { sessionId, sessionFile: "/tmp/w.jsonl", pid: 42, updatedAt: 9_000 };
+      writeFileSync(join(legacy, `${sessionId}.json`), JSON.stringify({ sessionID: sessionId, state: "idle", pid: 1 }));
+      assert.equal((read(sessionId, legacy, psc) as any).pid, 1);
+      writeFileSync(join(psc, `${sessionId}.json`), JSON.stringify({ ...base, activity: "working" }));
+      assert.deepEqual(read(sessionId, legacy, psc), { sessionID: sessionId, sessionFile: "/tmp/w.jsonl", pid: 42, updatedAt: 9_000, state: "processing" });
+      writeFileSync(join(psc, `${sessionId}.json`), JSON.stringify({ ...base, activity: "idle" }));
+      assert.equal((read(sessionId, legacy, psc) as any).state, "idle");
+      writeFileSync(join(psc, `${sessionId}.json`), JSON.stringify(base));
+      writeFileSync(join(legacy, `${sessionId}.json`), JSON.stringify({ sessionID: sessionId, state: "processing", pid: 1 }));
+      assert.equal((read(sessionId, legacy, psc) as any).state, "processing");
+      rmSync(join(legacy, `${sessionId}.json`));
+      const noState = read(sessionId, legacy, psc) as any;
+      assert.equal(noState.state, undefined);
+      assert.equal(noState.pid, 42);
+      assert.equal(statusModule.defaultPscPresenceDir({ XDG_STATE_HOME: "/x" }), "/x/psc/presence");
+      assert.equal(statusModule.defaultPscPresenceDir({ HOME: "/h" }), "/h/.local/state/psc/presence");
+    } finally {
+      rmSync(legacy, { recursive: true, force: true });
+      rmSync(psc, { recursive: true, force: true });
+    }
+  });
+
+  it("maps psc records through inspectSubagentStatus with full validation", () => {
+    const psc = createTestDir();
+    const legacy = createTestDir();
+    try {
+      const a = { id: "w", name: "W", surface: "p", startTime: 1_000, sessionId: "s-2", sessionFile: "/tmp/w.jsonl", doneFile: "/tmp/w.done" };
+      const probe = (presence: unknown) => ({ doneFileExists: false, paneState: "present" as const, processes: [{ pid: 42, ppid: 1, tty: "ttys1", state: "S", elapsed: "1", command: "pi" }], now: 10_000, presence });
+      const write = (r: object) => { writeFileSync(join(psc, "s-2.json"), JSON.stringify({ sessionId: "s-2", sessionFile: "/tmp/w.jsonl", pid: 42, updatedAt: 9_000, ...r })); return statusModule.readSubagentPresence("s-2", legacy, psc); };
+      assert.equal(inspectSubagentStatus(a, probe(write({ activity: "working" }))).activity, "processing");
+      assert.equal(inspectSubagentStatus(a, probe(write({ activity: "idle" }))).activity, "idle");
+      assert.equal(inspectSubagentStatus(a, probe(write({}))).activity, "unknown");
+      assert.equal(inspectSubagentStatus(a, probe(write({ activity: "working", pid: 7 }))).activity, "unknown");
+      assert.equal(inspectSubagentStatus(a, probe(write({ activity: "working", sessionFile: "/other" }))).activity, "unknown");
+    } finally {
+      rmSync(psc, { recursive: true, force: true });
+      rmSync(legacy, { recursive: true, force: true });
+    }
+  });
+
   const agent = {
     id: "worker-1",
     name: "Worker",

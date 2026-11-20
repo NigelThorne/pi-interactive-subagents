@@ -7,7 +7,8 @@ export type PaneState = "present" | "missing" | "unknown";
 export type SubagentLifecycle = "running" | "completed" | "unconfirmed" | "stale" | "unknown";
 export type SubagentActivity = "processing" | "idle" | "unknown";
 
-// The optional pi-session-manager-presence publisher heartbeats every 15 seconds.
+// Optional presence publishers (psc-presence, or legacy pi-session-manager-presence)
+// heartbeat every 15 seconds.
 const PRESENCE_MAX_AGE_MS = 45_000;
 
 export interface StatusAgent {
@@ -138,17 +139,48 @@ export function listChildPiProcesses(sessionFile: string): ChildPiProcess[] {
   return parseProcessRows(output, sessionFile);
 }
 
-/** Optional telemetry from pi-session-manager-presence, not a liveness probe. */
-export function readSubagentPresence(
-  sessionId: string | undefined,
-  directory = join(homedir(), ".pi", "agent", "session-manager", "live"),
-): unknown {
-  if (!sessionId) return undefined;
+export function defaultPscPresenceDir(env: NodeJS.ProcessEnv = process.env): string {
+  const state = env.XDG_STATE_HOME?.trim() ? env.XDG_STATE_HOME : join(env.HOME ?? homedir(), ".local", "state");
+  return join(state, "psc", "presence");
+}
+
+function readJson(directory: string, sessionId: string): unknown {
   try {
     return JSON.parse(readFileSync(join(directory, `${encodeURIComponent(sessionId)}.json`), "utf8"));
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Optional telemetry, not a liveness probe. Prefers psc-presence records
+ * (normalised to the legacy {sessionID, state} shape), falling back to the
+ * legacy pi-session-manager-presence record. A psc record without a known
+ * `activity` yields no state, so activity stays unknown.
+ */
+export function readSubagentPresence(
+  sessionId: string | undefined,
+  directory = join(homedir(), ".pi", "agent", "session-manager", "live"),
+  pscDirectory = defaultPscPresenceDir(),
+): unknown {
+  if (!sessionId) return undefined;
+  const psc = readJson(pscDirectory, sessionId) as Record<string, unknown> | undefined;
+  if (psc && typeof psc === "object") {
+    const state = psc.activity === "working" ? "processing" : psc.activity === "idle" ? "idle" : undefined;
+    if (!state) {
+      // Older psc-presence versions have no activity; prefer a legacy record if one exists.
+      const legacy = readJson(directory, sessionId);
+      if (legacy && typeof legacy === "object") return legacy;
+    }
+    return {
+      sessionID: psc.sessionId,
+      sessionFile: psc.sessionFile,
+      pid: psc.pid,
+      updatedAt: psc.updatedAt,
+      ...(state ? { state } : {}),
+    };
+  }
+  return readJson(directory, sessionId);
 }
 
 export function formatSubagentStatus(status: SubagentStatus): string {

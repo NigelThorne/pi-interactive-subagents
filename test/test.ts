@@ -595,7 +595,12 @@ describe("status.ts", () => {
       writeFileSync(join(psc, `${sessionId}.json`), JSON.stringify({ ...base, activity: "idle" }));
       assert.equal((read(sessionId, legacy, psc) as any).state, "idle");
       writeFileSync(join(psc, `${sessionId}.json`), JSON.stringify(base));
-      assert.equal((read(sessionId, legacy, psc) as any).state, undefined);
+      writeFileSync(join(legacy, `${sessionId}.json`), JSON.stringify({ sessionID: sessionId, state: "processing", pid: 1 }));
+      assert.equal((read(sessionId, legacy, psc) as any).state, "processing");
+      rmSync(join(legacy, `${sessionId}.json`));
+      const noState = read(sessionId, legacy, psc) as any;
+      assert.equal(noState.state, undefined);
+      assert.equal(noState.pid, 42);
       assert.equal(statusModule.defaultPscPresenceDir({ XDG_STATE_HOME: "/x" }), "/x/psc/presence");
       assert.equal(statusModule.defaultPscPresenceDir({ HOME: "/h" }), "/h/.local/state/psc/presence");
     } finally {

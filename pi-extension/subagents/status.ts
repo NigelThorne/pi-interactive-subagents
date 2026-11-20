@@ -167,6 +167,11 @@ export function readSubagentPresence(
   const psc = readJson(pscDirectory, sessionId) as Record<string, unknown> | undefined;
   if (psc && typeof psc === "object") {
     const state = psc.activity === "working" ? "processing" : psc.activity === "idle" ? "idle" : undefined;
+    if (!state) {
+      // Older psc-presence versions have no activity; prefer a legacy record if one exists.
+      const legacy = readJson(directory, sessionId);
+      if (legacy && typeof legacy === "object") return legacy;
+    }
     return {
       sessionID: psc.sessionId,
       sessionFile: psc.sessionFile,

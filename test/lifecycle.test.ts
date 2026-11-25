@@ -232,3 +232,23 @@ describe("child pi executable", () => {
     assert.equal(launch.resolvePiExecutable({ PATH: "/nonexistent" }), "pi");
   });
 });
+
+describe("subagent name validation", () => {
+  it("accepts ordinary display names", () => {
+    for (const name of ["seek-api-worker", "Scout: auth flow", "spawn test 2"]) {
+      assert.equal(launch.subagentNameError(name), undefined, name);
+    }
+  });
+
+  it("rejects names carrying leaked tool-call markup", () => {
+    const error = launch.subagentNameError('seek-api-worker</name>\n<parameter name="agent">worker');
+    assert.match(error ?? "", /malformed tool call/);
+    assert.match(error ?? "", /agent/);
+  });
+
+  it("rejects empty, multi-line and overlong names", () => {
+    assert.ok(launch.subagentNameError("  "));
+    assert.ok(launch.subagentNameError("a\nb"));
+    assert.ok(launch.subagentNameError("x".repeat(81)));
+  });
+});

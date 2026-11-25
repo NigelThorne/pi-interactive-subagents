@@ -37,6 +37,31 @@ export function resolvePiExecutable(env: NodeJS.ProcessEnv = process.env): strin
   return "pi";
 }
 
+const MAX_SUBAGENT_NAME_LENGTH = 80;
+
+/**
+ * Reject display names that cannot be a deliberate label. A model that emits a
+ * malformed tool call can leak the next parameter into `name`
+ * (e.g. `worker</name>\n<parameter name="agent">worker`), silently dropping it.
+ */
+export function subagentNameError(name: string): string | undefined {
+  if (/[<>]/.test(name)) {
+    return (
+      `Invalid subagent name ${JSON.stringify(name)}: it contains tool-call markup, which means a malformed tool call ` +
+      `merged other parameters (such as agent) into name. No subagent was launched. ` +
+      `Retry with name as a short plain label and agent, model, cwd and task as separate parameters.`
+    );
+  }
+  if (!name.trim()) return "Invalid subagent name: it is empty. No subagent was launched.";
+  if (/[\u0000-\u001f\u007f]/.test(name)) {
+    return `Invalid subagent name ${JSON.stringify(name)}: it must be a single line without control characters. No subagent was launched.`;
+  }
+  if (name.length > MAX_SUBAGENT_NAME_LENGTH) {
+    return `Invalid subagent name: it is longer than ${MAX_SUBAGENT_NAME_LENGTH} characters. No subagent was launched.`;
+  }
+  return undefined;
+}
+
 /** Always override a multiplexer server's possibly stale inherited value. */
 export function autoExitEnv(enabled: boolean): string {
   return `PI_SUBAGENT_AUTO_EXIT=${enabled ? "1" : "0"}`;

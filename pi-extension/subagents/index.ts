@@ -38,7 +38,14 @@ import {
   formatIncomingSteer,
   readRecordedParent,
 } from "./session-messaging.ts";
-import { autoExitEnv, completionTools, resolvePiExecutable, resumeAutoExit, wrapChildCommand } from "./launch.ts";
+import {
+  autoExitEnv,
+  completionTools,
+  resolvePiExecutable,
+  resumeAutoExit,
+  subagentNameError,
+  wrapChildCommand,
+} from "./launch.ts";
 import { discoverAgents, findAgent, type AgentDefinition, type AgentScope } from "./agent-registry.ts";
 import {
   prepareModelChoice,
@@ -890,6 +897,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (signal?.aborted) {
           return { content: [{ type: "text", text: "Subagent launch cancelled." }], details: { kind: "cancelled" }, isError: true };
         }
+        const nameError = subagentNameError(params.name);
+        if (nameError) {
+          return { content: [{ type: "text", text: nameError }], details: { error: "invalid name" }, isError: true };
+        }
         // Prevent self-spawning (e.g. planner spawning another planner)
         const currentAgent = process.env.PI_SUBAGENT_AGENT;
         if (params.agent && currentAgent && params.agent === currentAgent) {
@@ -1395,6 +1406,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         const name = params.name ?? "Resume";
+        const nameError = subagentNameError(name);
+        if (nameError) {
+          return { content: [{ type: "text", text: nameError }], details: { error: "invalid name" }, isError: true };
+        }
         const displayName = formatSubagentLabel(name);
         const startTime = Date.now();
 

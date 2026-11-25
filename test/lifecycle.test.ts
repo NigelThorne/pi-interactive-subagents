@@ -1,8 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import * as lifecycle from "../pi-extension/subagents/lifecycle.ts";
 import * as launch from "../pi-extension/subagents/launch.ts";
@@ -178,5 +178,57 @@ describe("launch completion contract", () => {
       execFileSync("sh", ["-c", launch.wrapChildCommand("sh -c 'exit 17'", done, cleanup)]);
       assert.equal(readFileSync(done, "utf8").trim(), "17");
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("child pi executable", () => {
+  function fixture() {
+    const dir = mkdtempSync(join(tmpdir(), "pi-exe-"));
+    const make = (path: string) => {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "#!/bin/sh\n");
+      chmodSync(path, 0o755);
+      return path;
+    };
+    return { dir, make, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  it("uses an explicit absolute override", () => {
+    const f = fixture();
+    try {
+      const exe = f.make(join(f.dir, "custom", "pi"));
+      assert.equal(launch.resolvePiExecutable({ PI_SUBAGENT_PI_EXECUTABLE: exe, PATH: "" }), exe);
+    } finally { f.cleanup(); }
+  });
+
+  it("uses the managed launcher when pi is not on the parent PATH", () => {
+    const f = fixture();
+    try {
+      const exe = f.make(join(f.dir, "agent", "bin", "pi"));
+      const root = join(f.dir, "agent", "bin", "..", "install");
+      assert.equal(launch.resolvePiExecutable({ PI_MANAGED_INSTALL_ROOT: root, PATH: "/usr/bin:/bin" }), exe);
+    } finally { f.cleanup(); }
+  });
+
+  it("resolves pi from PATH to an absolute path", () => {
+    const f = fixture();
+    try {
+      const exe = f.make(join(f.dir, "bin", "pi"));
+      assert.equal(launch.resolvePiExecutable({ PATH: `/nonexistent:${join(f.dir, "bin")}` }), exe);
+    } finally { f.cleanup(); }
+  });
+
+  it("prefers pi on PATH over the managed launcher", () => {
+    const f = fixture();
+    try {
+      f.make(join(f.dir, "agent", "bin", "pi"));
+      const onPath = f.make(join(f.dir, "path", "pi"));
+      const env = { PI_MANAGED_INSTALL_ROOT: join(f.dir, "agent", "install"), PATH: join(f.dir, "path") };
+      assert.equal(launch.resolvePiExecutable(env), onPath);
+    } finally { f.cleanup(); }
+  });
+
+  it("falls back to bare pi", () => {
+    assert.equal(launch.resolvePiExecutable({ PATH: "/nonexistent" }), "pi");
   });
 });

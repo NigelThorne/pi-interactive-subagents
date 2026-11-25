@@ -38,7 +38,7 @@ import {
   formatIncomingSteer,
   readRecordedParent,
 } from "./session-messaging.ts";
-import { autoExitEnv, completionTools, resumeAutoExit, wrapChildCommand } from "./launch.ts";
+import { autoExitEnv, completionTools, resolvePiExecutable, resumeAutoExit, wrapChildCommand } from "./launch.ts";
 import { discoverAgents, findAgent, type AgentDefinition, type AgentScope } from "./agent-registry.ts";
 import {
   prepareModelChoice,
@@ -486,7 +486,7 @@ async function launchSubagent(
     : `${roleBlock}\n\n${modeHint}\n\n${tabTitleInstruction}\n\n${params.task}\n\n${completionInstructions}`;
 
   // Build pi command
-  const parts: string[] = ["pi"];
+  const parts: string[] = [shellEscape(resolvePiExecutable())];
   parts.push("--session", shellEscape(subagentSessionFile));
 
   // For fork mode, create a clean copy of the session that excludes
@@ -1420,7 +1420,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         );
 
         // Build pi resume command
-        const parts = ["pi", "--session", shellEscape(params.sessionPath)];
+        const parts = [shellEscape(resolvePiExecutable()), "--session", shellEscape(params.sessionPath)];
 
         // Load subagent-done extension so the agent can self-terminate if needed
         const subagentDonePath = join(
